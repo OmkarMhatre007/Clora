@@ -86,8 +86,11 @@ class EvidenceManifestGenerator:
         return manifest
 
     @classmethod
-    def save_manifest(cls, state: Dict[str, Any], output_path: str) -> str:
-        manifest = cls.build_manifest(state)
+    def save_manifest(cls, data: Dict[str, Any], output_path: str) -> str:
+        if "investigation_id" in data and "verification" in data:
+            manifest = data
+        else:
+            manifest = cls.build_manifest(data)
         with open(output_path, "w", encoding="utf-8") as f:
             json.dump(manifest, f, indent=2)
         return output_path
