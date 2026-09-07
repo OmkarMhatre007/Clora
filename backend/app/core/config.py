@@ -1,6 +1,10 @@
 from pathlib import Path
 
-from pydantic_settings import BaseSettings, SettingsConfigDict
+try:
+    from pydantic_settings import BaseSettings, SettingsConfigDict
+except ImportError:
+    from pydantic import BaseModel as BaseSettings
+    SettingsConfigDict = dict
 
 
 class Settings(BaseSettings):
