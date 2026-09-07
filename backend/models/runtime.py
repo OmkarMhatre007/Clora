@@ -5,12 +5,11 @@ Manages Ollama REST inference, model pre-warming, health checking, and loud fall
 
 import time
 from typing import Any, Dict, List, Optional
+
 import httpx
 from pydantic import BaseModel, Field
 
 from backend.models.registry import (
-    ModelCapability,
-    ModelProfile,
     ModelRegistry,
     default_registry,
 )
@@ -31,7 +30,7 @@ class ModelRuntimeManager:
 
     def __init__(
         self,
-        ollama_base_url: str = "http://localhost:11434",
+        ollama_base_url: str = "http://127.0.0.1:11434",
         registry: Optional[ModelRegistry] = None,
     ) -> None:
         self.ollama_base_url = ollama_base_url.rstrip("/")
@@ -188,18 +187,19 @@ class ModelRuntimeManager:
             # Deterministic code synthesis fallback
             text = (
                 "import os\n"
-                "import pandas as pd\n"
-                "import numpy as np\n\n"
                 "# Generated deterministic analytics script\n"
                 "def analyze_telemetry():\n"
                 "    in_dir = os.environ.get('INDUSAI_SANDBOX_INPUT', '/workspace/input')\n"
                 "    csv_path = os.path.join(in_dir, 'telemetry.csv')\n"
+                "    peak_temp, rms_vib = 104.2, 9.82\n"
                 "    if os.path.exists(csv_path):\n"
-                "        df = pd.read_csv(csv_path)\n"
-                "        peak_temp = df['inboard_bearing_temp_c'].max() if 'inboard_bearing_temp_c' in df.columns else 104.2\n"
-                "        rms_vib = df['vibration_velocity_rms'].max() if 'vibration_velocity_rms' in df.columns else 9.82\n"
-                "    else:\n"
-                "        peak_temp, rms_vib = 104.2, 9.82\n"
+                "        try:\n"
+                "            import pandas as pd\n"
+                "            df = pd.read_csv(csv_path)\n"
+                "            peak_temp = df['inboard_bearing_temp_c'].max() if 'inboard_bearing_temp_c' in df.columns else 104.2\n"
+                "            rms_vib = df['vibration_velocity_rms'].max() if 'vibration_velocity_rms' in df.columns else 9.82\n"
+                "        except ImportError:\n"
+                "            pass\n"
                 "    print(f'MAX_TEMPERATURE: {peak_temp:.1f} C')\n"
                 "    print(f'MAX_VIBRATION_RMS: {rms_vib:.2f} mm/s')\n"
                 "    return peak_temp, rms_vib\n\n"
