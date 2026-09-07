@@ -39,3 +39,8 @@ class AgentState(TypedDict, total=False):
     code_verification_result: dict
     calculation_result: dict
     sandbox_output_files: list
+
+    # Multimodal Visual Inspection Extensions
+    image_artifact_id: str
+    visual_evidence_ids: list
+    visual_inspection_result: dict

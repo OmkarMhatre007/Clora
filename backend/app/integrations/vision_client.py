@@ -9,8 +9,8 @@ from backend.app.core.config import settings
 
 class VisionClient:
     """
-    Interface wrapper for Member 6 Vision / P&ID diagram inspection and symbol recognition.
-    Integrates with VisionDiagramAgent with local-first sovereign fallback.
+    Interface wrapper for Multimodal Vision (P&ID diagrams and Physical Photographs).
+    Integrates with MultimodalVisionAgent with local-first sovereign fallback.
     """
 
     def __init__(self, base_url: str | None = None):
@@ -20,8 +20,8 @@ class VisionClient:
     def _get_agent(self):
         if self._agent is None:
             try:
-                from backend.agents.vision_agent import VisionDiagramAgent
-                self._agent = VisionDiagramAgent()
+                from backend.agents.vision_agent import MultimodalVisionAgent
+                self._agent = MultimodalVisionAgent()
             except Exception:
                 self._agent = None
         return self._agent
@@ -31,9 +31,10 @@ class VisionClient:
         workspace_id: str,
         question: str,
         files_metadata: list[dict[str, Any]] | None = None,
+        telemetry_context: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         """
-        Inspect diagram images (P&ID drawings, piping schematics) for relevant tags and valves.
+        Inspect diagram or photograph images for relevant tags, valves, or physical defects.
         """
         # 1. If remote service URL configured and reachable, attempt HTTP dispatch
         if self.base_url:
@@ -44,6 +45,7 @@ class VisionClient:
                         json={
                             "workspace_id": workspace_id,
                             "question": question,
+                            "telemetry_context": telemetry_context,
                         },
                         headers={"X-Internal-Service-Key": settings.INTERNAL_SERVICE_KEY},
                     )
@@ -54,22 +56,20 @@ class VisionClient:
 
         files = files_metadata or []
         img_file = next(
-            (f for f in files if str(f.get("file_type", "")).lower() in ["png", "jpg", "jpeg", "svg", "tiff", "pdf"]),
+            (f for f in files if str(f.get("file_type", "")).lower() in ["png", "jpg", "jpeg", "svg", "tiff", "webp", "pdf"]),
             None
         )
 
         img_id = img_file["id"] if img_file else "img-pid-cool-01"
         img_name = img_file["filename"] if img_file else "PID_Cooling_Water_Circuit_P101.png"
 
-        # 2. Attempt dynamic local analysis using VisionDiagramAgent
+        # 2. Attempt dynamic local analysis using MultimodalVisionAgent
         agent = self._get_agent()
         if agent:
-            # Resolve physical disk path if file exists
             file_path = None
             if img_file and "filepath" in img_file:
                 file_path = img_file["filepath"]
             elif img_file and "id" in img_file:
-                # Standard storage location
                 candidate = Path(settings.STORAGE_DIR) / "workspaces" / workspace_id / f"{img_file['id']}.png"
                 if candidate.exists():
                     file_path = str(candidate)
@@ -77,7 +77,8 @@ class VisionClient:
             agent_res = agent.analyze(
                 question=question,
                 drawing_path=file_path,
-                drawing_metadata={"id": img_id, "filename": img_name}
+                drawing_metadata={"id": img_id, "filename": img_name},
+                telemetry_context=telemetry_context,
             )
             return agent_res.get("citations", [])
 
@@ -95,6 +96,36 @@ class VisionClient:
             "confidence": 0.96,
             "file_available": True,
         }]
+
+    async def inspect_photograph(
+        self,
+        workspace_id: str,
+        question: str,
+        image_path: Optional[str] = None,
+        image_artifact_id: Optional[str] = None,
+        telemetry_context: Optional[dict[str, Any]] = None,
+        metadata: Optional[dict[str, Any]] = None,
+    ) -> dict[str, Any]:
+        """Direct inspection interface for industrial field photography."""
+        agent = self._get_agent()
+        meta = dict(metadata or {})
+        if image_artifact_id:
+            meta["id"] = image_artifact_id
+
+        if agent:
+            return agent.analyze(
+                question=question,
+                drawing_path=image_path,
+                drawing_metadata=meta,
+                telemetry_context=telemetry_context,
+            )
+
+        # Fallback baseline
+        return {
+            "question": question,
+            "citations": [],
+            "summary": "Visual agent unavailable for photograph inspection."
+        }
 
 
 vision_client = VisionClient()

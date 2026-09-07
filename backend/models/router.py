@@ -47,9 +47,26 @@ class IntelligentModelRouter:
         self.runtime = runtime or default_runtime
         self.audit_file = audit_file
 
-    def classify_task(self, query: str) -> Dict[str, Any]:
-        """Analyzes query to detect capability requirement, code need, and domain intent."""
+    def classify_task(self, query: str, metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Analyzes query and optional attachment metadata to detect capability requirement."""
         q_lower = query.lower()
+        meta = metadata or {}
+        file_type = str(meta.get("file_type", "")).lower()
+        mime = str(meta.get("mime_type", "")).lower()
+
+        # 0. Multimodal visual inspection indicators
+        has_image_attachment = (
+            file_type in ["png", "jpg", "jpeg", "webp", "tiff", "image"]
+            or "image/" in mime
+            or bool(meta.get("has_image"))
+            or bool(meta.get("image_artifact_id"))
+        )
+        visual_triggers = [
+            "inspect photo", "photo", "photograph", "picture", "image", "visual inspection",
+            "nameplate", "rating plate", "spalling", "corrosion", "p&id", "drawing", "schematic",
+            "wear on bearing", "flange leak", "look at", "examine photo"
+        ]
+        is_visual = has_image_attachment or any(t in q_lower for t in visual_triggers)
 
         # 1. Explicit computational action triggers (requires deliberate calculation or scripting intent)
         code_action_triggers = [
@@ -63,7 +80,7 @@ class IntelligentModelRouter:
         # 2. Deep Root-Cause Investigation triggers
         rca_triggers = [
             "why", "fail", "failure", "cause", "root cause", "overheat",
-            "breakdown", "incident", "trip", "spalling", "runaway"
+            "breakdown", "incident", "trip", "runaway"
         ]
         is_rca = any(t in q_lower for t in rca_triggers)
 
@@ -72,9 +89,13 @@ class IntelligentModelRouter:
         is_sop = any(t in q_lower for t in sop_triggers)
 
         # Disambiguation:
-        # If query asks a causal/incident question (e.g., "Did delta pressure cause valve to fail?"),
-        # it is an RCA investigation unless explicitly requesting code generation / calculation.
-        if is_rca and not any(k in q_lower for k in ["calculate", "compute", "script", "plot", "write python", "run code"]):
+        # Prioritize explicit visual inspection when image attachment or photo query is present
+        if is_visual and not has_code_action:
+            task_type = "visual_inspection"
+            req_capability = ModelCapability.MULTIMODAL_VISION
+            reasoning = "Task involves multimodal visual inspection of industrial field photograph or schematic."
+            is_code = False
+        elif is_rca and not has_code_action:
             task_type = "root_cause_investigation"
             req_capability = ModelCapability.REASONING_RCA
             reasoning = "Task involves multi-source causal investigation and failure correlation."
@@ -105,6 +126,7 @@ class IntelligentModelRouter:
             "required_capability": req_capability,
             "is_code": is_code,
             "is_rca": is_rca,
+            "is_visual": is_visual,
             "reasoning": reasoning,
         }
 
@@ -159,10 +181,14 @@ class IntelligentModelRouter:
         return total_score, breakdown
 
     def route_task(
-        self, query: str, user_id: str = "operator_01", user_role: str = "Operator"
+        self,
+        query: str,
+        user_id: str = "operator_01",
+        user_role: str = "Operator",
+        metadata: Optional[Dict[str, Any]] = None,
     ) -> RoutingDecision:
         """Determines the optimal model and logs routing telemetry to the audit trail."""
-        analysis = self.classify_task(query)
+        analysis = self.classify_task(query, metadata=metadata)
         req_cap = analysis["required_capability"]
         task_type = analysis["task_type"]
 

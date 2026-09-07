@@ -13,6 +13,7 @@ class ModelCapability(str, Enum):
     REASONING_RCA = "reasoning_rca"
     FAST_TRIAGE = "fast_triage"
     FACTUAL_EXTRACTION = "factual_extraction"
+    MULTIMODAL_VISION = "multimodal_vision"
     GENERAL = "general"
 
 
@@ -149,7 +150,25 @@ class ModelRegistry:
             )
         )
 
-        # 4. Deterministic Air-Gap Fallback Simulation
+        # 4. Multimodal Vision Model Profile
+        self.register(
+            ModelProfile(
+                model_id="moondream",
+                display_name="Moondream Local Vision (Quantized)",
+                provider="ollama",
+                capabilities=[
+                    ModelCapability.MULTIMODAL_VISION,
+                    ModelCapability.FACTUAL_EXTRACTION,
+                ],
+                hardware_tier=HardwareTier.LOW_SPEC_CPU,
+                context_window=2048,
+                timeout_seconds=8.0,
+                quantization="q4_k_m",
+                description="Lightweight local vision-language model for physical inspection and OCR.",
+            )
+        )
+
+        # 5. Deterministic Air-Gap Fallback Simulation
         self.register(
             ModelProfile(
                 model_id="deterministic-airgap-mock",
@@ -160,6 +179,7 @@ class ModelRegistry:
                     ModelCapability.REASONING_RCA,
                     ModelCapability.FAST_TRIAGE,
                     ModelCapability.FACTUAL_EXTRACTION,
+                    ModelCapability.MULTIMODAL_VISION,
                     ModelCapability.GENERAL,
                 ],
                 hardware_tier=HardwareTier.LOW_SPEC_CPU,
