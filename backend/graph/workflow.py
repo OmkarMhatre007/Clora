@@ -56,9 +56,10 @@ def build_workflow(
             "is_fallback": routing.is_fallback,
         })
 
-        # Cryptographic air-gap checkpoint
+        # Cryptographic air-gap checkpoint: PLANNING
         proof = sentinel.audit_cycle("AGENT_PLANNING_OFFLINE", {"intent": intent})
         audit_log.append({"event": "airgap_checkpoint", "stage": "AGENT_PLANNING_OFFLINE", "hash": proof.get("entry_hash")})
+        hashes = [proof.get("entry_hash")]
 
         return {
             "intent": intent,
@@ -66,6 +67,7 @@ def build_workflow(
             "model_routing": routing.model_dump(),
             "audit_log": audit_log,
             "airgap_proof_hash": proof.get("entry_hash"),
+            "airgap_proof_hashes": hashes,
         }
 
     def retrieve_evidence(state: AgentState) -> Dict[str, Any]:
@@ -82,11 +84,21 @@ def build_workflow(
                 "sources": [e.source_document for e in evidence_objs],
             }
         )
+
+        # Cryptographic air-gap checkpoint: RETRIEVAL
+        ret_proof = sentinel.audit_cycle("AGENT_RAG_RETRIEVAL_OFFLINE", {"count": len(evidence_objs)})
+        audit_log.append({"event": "airgap_checkpoint", "stage": "AGENT_RAG_RETRIEVAL_OFFLINE", "hash": ret_proof.get("entry_hash")})
+        hashes = list(state.get("airgap_proof_hashes", []))
+        if ret_proof.get("entry_hash"):
+            hashes.append(ret_proof.get("entry_hash"))
+
         return {
             "retrieved_evidence": evidence_dicts,
             "evidence": evidence_dicts,
             "retrieved_docs": evidence_dicts,
             "audit_log": audit_log,
+            "airgap_proof_hash": ret_proof.get("entry_hash"),
+            "airgap_proof_hashes": hashes,
         }
 
     def cross_correlate(state: AgentState) -> Dict[str, Any]:
@@ -157,6 +169,8 @@ def build_workflow(
         claims = extractor.extract_claims(draft)
         res = verifier.verify_all(claims, pack)
 
+        # Cryptographic air-gap checkpoint: VERIFICATION
+        ver_proof = sentinel.audit_cycle("AGENT_CLAIM_VERIFICATION_OFFLINE", {"confidence": res.overall_confidence})
         audit_log = list(state.get("audit_log", []))
         audit_log.append(
             {
@@ -167,6 +181,10 @@ def build_workflow(
                 "confidence": res.overall_confidence,
             }
         )
+        audit_log.append({"event": "airgap_checkpoint", "stage": "AGENT_CLAIM_VERIFICATION_OFFLINE", "hash": ver_proof.get("entry_hash")})
+        hashes = list(state.get("airgap_proof_hashes", []))
+        if ver_proof.get("entry_hash"):
+            hashes.append(ver_proof.get("entry_hash"))
 
         return {
             "claims": [c.model_dump() for c in res.claims],
@@ -174,6 +192,8 @@ def build_workflow(
             "verification_status": res.overall_status,
             "confidence": res.overall_confidence,
             "audit_log": audit_log,
+            "airgap_proof_hash": ver_proof.get("entry_hash"),
+            "airgap_proof_hashes": hashes,
         }
 
     def apply_guardrails(state: AgentState) -> Dict[str, Any]:
@@ -199,26 +219,35 @@ def build_workflow(
         audit_log = list(state.get("audit_log", []))
         audit_log.append({"event": "guardrail_applied", "status": formatted["guardrail_status"]})
 
-        # Cryptographic air-gap synthesis checkpoint
+        # Cryptographic air-gap synthesis checkpoint: FINAL SYNTHESIS
         final_proof = sentinel.audit_cycle("AGENT_FINAL_SYNTHESIS_OFFLINE", {"status": formatted["guardrail_status"]})
         audit_log.append({"event": "airgap_checkpoint", "stage": "AGENT_FINAL_SYNTHESIS_OFFLINE", "hash": final_proof.get("entry_hash")})
 
-        # Ed25519 Cryptographic Evidence Attestation
-        from security.attestation import get_attestor
-        attestor = get_attestor()
-        sources_list = [e.source_document for e in evidence_objs]
-        attestation = attestor.sign_report(
-            report_id=f"RPT-{final_proof.get('entry_hash', '0')[:8]}",
-            content=formatted["answer"],
-            sources=sources_list,
-            extra_metadata={"confidence": conf, "guardrail_status": formatted["guardrail_status"]},
-        )
-        audit_log.append({
-            "event": "evidence_attested",
-            "key_id": attestation.get("key_id"),
-            "content_sha256": attestation.get("content_sha256"),
-            "signature_snippet": attestation.get("signature", "")[:16] + "...",
-        })
+        hashes = list(state.get("airgap_proof_hashes", []))
+        if final_proof.get("entry_hash"):
+            hashes.append(final_proof.get("entry_hash"))
+
+        # Ed25519 Cryptographic Evidence Attestation (Best-effort, never crashes query)
+        attestation = None
+        try:
+            from security.attestation import get_attestor
+            attestor = get_attestor()
+            sources_list = [e.source_document for e in evidence_objs]
+            attestation = attestor.sign_report(
+                report_id=f"RPT-{final_proof.get('entry_hash', '0')[:8]}",
+                content=formatted["answer"],
+                sources=sources_list,
+                extra_metadata={"confidence": conf, "guardrail_status": formatted["guardrail_status"], "airgap_hashes": hashes},
+            )
+            if attestation:
+                audit_log.append({
+                    "event": "evidence_attested",
+                    "key_id": attestation.get("key_id"),
+                    "content_sha256": attestation.get("content_sha256"),
+                    "signature_snippet": attestation.get("signature", "")[:16] + "...",
+                })
+        except Exception as sign_err:
+            logger.warning("Attestation signing notice: %s", sign_err)
 
         return {
             "final_answer": formatted["answer"],
@@ -226,6 +255,7 @@ def build_workflow(
             "guardrail_status": formatted["guardrail_status"],
             "audit_log": audit_log,
             "airgap_proof_hash": final_proof.get("entry_hash"),
+            "airgap_proof_hashes": hashes,
             "evidence_attestation": attestation,
         }
 

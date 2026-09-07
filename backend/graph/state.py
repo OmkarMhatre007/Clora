@@ -30,6 +30,7 @@ class AgentState(TypedDict, total=False):
     final_answer: str
     audit_log: list
     airgap_proof_hash: str
+    airgap_proof_hashes: list
     evidence_attestation: dict
 
     # Multi-Model Routing & Sandboxed Coding Task Extensions

@@ -22,6 +22,10 @@ class Settings(BaseSettings):
     AIRGAP_AUDIT_INTERVAL_SEC: float = 5.0
     AIRGAP_LOG_PATH: Path = Path("./storage/airgap_proof_log.jsonl")
     AIRGAP_ATTESTATION_PATH: Path = Path("./storage/CLORA_NETWORK_COMPLIANCE_ATTESTATION.txt")
+    AIRGAP_STARTUP_VALIDATION: bool = True
+    AIRGAP_DNS_HOOK_ENABLED: bool = True
+    AIRGAP_OS_DENY_RULE_NAME: str = "CLORA_DENY_OUTBOUND"
+    AIRGAP_STRICT_MODE: str = "warn_only"
     KEYS_DIR: Path = Path("./storage/keys")
 
     ALLOWED_EXTENSIONS: list[str] = [

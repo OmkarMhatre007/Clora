@@ -15,7 +15,9 @@ import logging
 import os
 import psutil
 import socket
+import sys
 import threading
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
@@ -37,6 +39,22 @@ class AirGapViolationError(PermissionError):
         self.profile = profile
         self.reason = reason or f"Outbound connection to {destination_ip}:{destination_port} blocked by {profile} policy."
         super().__init__(self.reason)
+
+
+@dataclass
+class EgressMetrics:
+    """Tracks verified counts of blocked and approved socket connections."""
+    blocked_attempts_count: int = 0
+    approved_connections_count: int = 0
+    blocked_destinations: List[str] = field(default_factory=list)
+    # bytes_intercepted_estimate is permanently omitted — blocked connect() transfers 0 bytes.
+
+    def snapshot(self) -> Dict[str, Any]:
+        return {
+            "blocked_attempts_count": self.blocked_attempts_count,
+            "approved_connections_count": self.approved_connections_count,
+            "blocked_destinations": list(self.blocked_destinations[-20:]),
+        }
 
 
 def is_local_address(ip: str) -> bool:
@@ -112,33 +130,113 @@ class AddressValidator:
         return False, str(addr)
 
 
+_thread_local = threading.local()
+
+
 class AirGapEnforcer:
     """
     Level A: Application-Level Sovereignty Guard.
-    Synchronously intercepts socket.socket.connect before outbound network handshakes occur.
+    Synchronously intercepts socket.socket.connect and socket.getaddrinfo before
+    outbound network handshakes or DNS queries occur.
     """
 
     _lock = threading.Lock()
     _is_active: bool = False
     _original_connect: Optional[Callable] = None
+    _original_getaddrinfo: Optional[Callable] = None
     _profile: NetworkTrustProfile = NetworkTrustProfile.STRICT_AIRGAP
     _validator: AddressValidator = AddressValidator(NetworkTrustProfile.STRICT_AIRGAP)
-    _violation_callback: Optional[Callable[[str, int, str], None]] = None
+    _violation_callback: Optional[Callable] = None
+    _pre_activation_imports: List[str] = []
+    _metrics: EgressMetrics = EgressMetrics()
+
+    @classmethod
+    def set_self_test_mode(cls, active: bool) -> None:
+        """Sets self_test flag on calling thread's local context."""
+        _thread_local.is_self_test = active
+
+    @classmethod
+    def is_self_test_active(cls) -> bool:
+        """Returns True if the current thread is executing within a self-test."""
+        return getattr(_thread_local, "is_self_test", False)
+
+    @classmethod
+    def is_pre_activation_dns_clean(cls) -> bool:
+        """Returns True if no pre-activation modules held direct references to getaddrinfo."""
+        return len(getattr(cls, "_pre_activation_imports", [])) == 0
+
+    @classmethod
+    def get_metrics(cls) -> Dict[str, Any]:
+        """Returns snapshot of current egress metrics."""
+        return cls._metrics.snapshot()
+
+    @classmethod
+    def _audit_pre_activation_dns_imports(cls, pristine_getaddrinfo: Callable) -> List[str]:
+        """
+        Scans sys.modules for any module holding a direct reference to unpatched
+        socket.getaddrinfo (e.g. from `from socket import getaddrinfo`).
+        socket.socket.connect is a class method resolved dynamically, but bare
+        function imports bypass monkeypatching if imported prior to activate().
+        """
+        suspicious: List[str] = []
+        ignored_modules = {
+            "socket", "_socket", "security.airgap_monitor", "threading",
+            "contextvars", "sys", "builtins", "types"
+        }
+
+        for mod_name, mod in list(sys.modules.items()):
+            if not mod or mod_name in ignored_modules or mod_name.startswith("encodings."):
+                continue
+            try:
+                mod_vars = vars(mod)
+            except Exception:
+                continue
+            for attr in mod_vars.values():
+                if attr is pristine_getaddrinfo:
+                    suspicious.append(mod_name)
+                    break
+
+        if suspicious:
+            strict_mode = os.environ.get("AIRGAP_STRICT_MODE", "warn_only").lower()
+            msg = (
+                f"AirGapEnforcer: Modules {suspicious} imported direct reference to "
+                f"socket.getaddrinfo BEFORE activation. DNS queries from these modules "
+                f"bypass instrumentation. Ensure AirGapEnforcer.activate() is first in main.py."
+            )
+            if strict_mode == "hard_fail":
+                raise RuntimeError(msg)
+            else:
+                logger.critical(msg)
+        return suspicious
 
     @classmethod
     def activate(
         cls,
         profile: NetworkTrustProfile = NetworkTrustProfile.STRICT_AIRGAP,
         approved_cidrs: Optional[List[str]] = None,
-        on_violation: Optional[Callable[[str, int, str], None]] = None
+        on_violation: Optional[Callable] = None
     ) -> None:
         with cls._lock:
             cls._profile = profile
             cls._validator = AddressValidator(profile, approved_cidrs)
             cls._violation_callback = on_violation
 
+            # Set Ollama cloud offline environment flag
+            os.environ["OLLAMA_NO_CLOUD"] = "1"
+
             if not cls._is_active:
-                cls._original_connect = socket.socket.connect
+                # 1. Capture pristine unpatched callables BEFORE any monkeypatching
+                original_getaddrinfo = socket.getaddrinfo
+                original_connect = socket.socket.connect
+
+                # 2. Run activation-order audit for unpatched getaddrinfo references
+                cls._pre_activation_imports = cls._audit_pre_activation_dns_imports(original_getaddrinfo)
+
+                # 3. Store originals
+                cls._original_connect = original_connect
+                cls._original_getaddrinfo = original_getaddrinfo
+                socket.socket._original_connect = original_connect
+                socket._original_getaddrinfo = original_getaddrinfo
 
                 def intercepted_connect(sock_self, address):
                     destination_ip = "0.0.0.0"
@@ -151,13 +249,30 @@ class AirGapEnforcer:
                         destination_ip = resolved_ip
 
                         if not approved:
-                            logger.error(
-                                "AirGapEnforcer BLOCKED unauthorized connection to %s:%s under profile %s",
-                                destination_ip, destination_port, cls._profile.value
-                            )
+                            is_self_test = cls.is_self_test_active()
+                            dest_str = f"{destination_ip}:{destination_port}"
+                            if not is_self_test:
+                                cls._metrics.blocked_attempts_count += 1
+                                cls._metrics.blocked_destinations.append(dest_str)
+                                logger.error(
+                                    "AirGapEnforcer BLOCKED unauthorized connection to %s under profile %s",
+                                    dest_str, cls._profile.value
+                                )
+                            else:
+                                logger.info(
+                                    "AirGapEnforcer intercepted expected self-test probe to %s under profile %s",
+                                    dest_str, cls._profile.value
+                                )
+
                             if cls._violation_callback:
                                 try:
-                                    cls._violation_callback(destination_ip, destination_port, cls._profile.value)
+                                    if is_self_test:
+                                        try:
+                                            cls._violation_callback(destination_ip, destination_port, cls._profile.value, is_self_test)
+                                        except TypeError:
+                                            cls._violation_callback(destination_ip, destination_port, cls._profile.value)
+                                    else:
+                                        cls._violation_callback(destination_ip, destination_port, cls._profile.value)
                                 except Exception as cb_err:
                                     logger.error("Error executing violation callback: %s", cb_err)
 
@@ -166,10 +281,48 @@ class AirGapEnforcer:
                                 destination_port=destination_port,
                                 profile=cls._profile.value
                             )
+                        else:
+                            cls._metrics.approved_connections_count += 1
 
                     return cls._original_connect(sock_self, address)
 
+                def intercepted_getaddrinfo(host, port, *args, **kwargs):
+                    if cls._profile == NetworkTrustProfile.STRICT_AIRGAP:
+                        # Pure airgap: only loopback hostnames allowed
+                        host_str = str(host).lower() if host else ""
+                        if host_str not in ("localhost", "127.0.0.1", "::1", "0.0.0.0", "::"):
+                            is_self_test = cls.is_self_test_active()
+                            dest_str = f"{host}:{port or 0}"
+                            if not is_self_test:
+                                cls._metrics.blocked_attempts_count += 1
+                                cls._metrics.blocked_destinations.append(dest_str)
+                                logger.error(
+                                    "AirGapEnforcer BLOCKED DNS resolution for %s under %s policy.",
+                                    host, cls._profile.value
+                                )
+                            if cls._violation_callback:
+                                try:
+                                    if is_self_test:
+                                        try:
+                                            cls._violation_callback(str(host), int(port or 0), cls._profile.value, is_self_test)
+                                        except TypeError:
+                                            cls._violation_callback(str(host), int(port or 0), cls._profile.value)
+                                    else:
+                                        cls._violation_callback(str(host), int(port or 0), cls._profile.value)
+                                except Exception as cb_err:
+                                    logger.error("Error executing violation callback: %s", cb_err)
+
+                            raise AirGapViolationError(
+                                destination_ip=str(host),
+                                destination_port=int(port or 0),
+                                profile=cls._profile.value,
+                                reason=f"DNS resolution for '{host}' blocked by STRICT_AIRGAP policy."
+                            )
+
+                    return cls._original_getaddrinfo(host, port, *args, **kwargs)
+
                 socket.socket.connect = intercepted_connect
+                socket.getaddrinfo = intercepted_getaddrinfo
                 cls._is_active = True
                 logger.info("AirGapEnforcer activated in profile: %s", cls._profile.value)
 
@@ -187,8 +340,11 @@ class AirGapEnforcer:
     @classmethod
     def deactivate(cls) -> None:
         with cls._lock:
-            if cls._is_active and cls._original_connect:
-                socket.socket.connect = cls._original_connect
+            if cls._is_active:
+                if cls._original_connect:
+                    socket.socket.connect = cls._original_connect
+                if cls._original_getaddrinfo:
+                    socket.getaddrinfo = cls._original_getaddrinfo
                 cls._is_active = False
                 logger.info("AirGapEnforcer deactivated.")
 
