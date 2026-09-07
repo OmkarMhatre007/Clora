@@ -17,10 +17,19 @@ import os
 import io
 import gc
 import hashlib
-from typing import List, Dict, Any, Optional, Tuple
-import pymupdf as fitz  # PyMuPDF
+try:
+    import pymupdf as fitz  # PyMuPDF
+except ImportError:
+    try:
+        import fitz
+    except ImportError:
+        fitz = None
+
 from PIL import Image
-import pytesseract
+try:
+    import pytesseract
+except ImportError:
+    pytesseract = None
 
 from .models import (
     PageExtraction,
@@ -35,10 +44,11 @@ POSSIBLE_TESSERACT_PATHS = [
     os.path.expandvars(r"%LOCALAPPDATA%\Programs\Tesseract-OCR\tesseract.exe")
 ]
 
-for p in POSSIBLE_TESSERACT_PATHS:
-    if os.path.exists(p):
-        pytesseract.pytesseract.tesseract_cmd = p
-        break
+if pytesseract is not None:
+    for p in POSSIBLE_TESSERACT_PATHS:
+        if os.path.exists(p):
+            pytesseract.pytesseract.tesseract_cmd = p
+            break
 
 
 def compute_file_sha256(file_path: str) -> str:
