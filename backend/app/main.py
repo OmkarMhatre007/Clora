@@ -23,6 +23,7 @@ AirGapEnforcer.activate(profile=_DEFAULT_PROFILE)
 # ══════════════════════════════════════════════════════════════
 from contextlib import asynccontextmanager
 import logging
+from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -184,6 +185,68 @@ async def lifespan(app: FastAPI):
     finally:
         db.close()
 
+    # Ensure default workspace exists and seed sample files if empty
+    from backend.app.db.models import Workspace, File
+    import hashlib
+    import shutil
+    db_seed = database.SessionLocal()
+    try:
+        def_ws = db_seed.query(Workspace).filter(Workspace.id == "default-workspace").first()
+        if not def_ws:
+            def_ws = Workspace(
+                id="default-workspace",
+                name="CDU Unit-02 Maintenance",
+                description="MRPL Crude Distillation Unit 2 - Technical Audit & Maintenance Workspace",
+                owner_id="eng_user_01"
+            )
+            db_seed.add(def_ws)
+            db_seed.commit()
+
+        # Seed sample files if none exist in default workspace
+        ws_storage = ws_dir / "default-workspace"
+        ws_storage.mkdir(parents=True, exist_ok=True)
+        
+        existing_files = db_seed.query(File).filter(File.workspace_id == "default-workspace").all()
+        if not existing_files:
+            samples_dir = Path("./samples")
+            sample_candidates = [
+                ("sample_inspection_digital.pdf", "application/pdf"),
+                ("sample_inspection_scanned.pdf", "application/pdf"),
+                ("equipment_maintenance.csv", "text/csv"),
+                ("PID_Cooling_Water_Circuit_P101.png", "image/png"),
+            ]
+            for s_name, s_type in sample_candidates:
+                s_path = samples_dir / s_name
+                if s_path.exists():
+                    dest_path = ws_storage / s_name
+                    shutil.copy2(s_path, dest_path)
+                    
+                    with open(dest_path, "rb") as f:
+                        file_bytes = f.read()
+                        f_hash = hashlib.sha256(file_bytes).hexdigest()
+                        f_size = len(file_bytes)
+                    
+                    file_rec = File(
+                        id=f"file_{s_name.replace('.', '_').lower()}",
+                        workspace_id="default-workspace",
+                        filename=s_name,
+                        filepath=str(dest_path),
+                        file_type=s_type,
+                        size=f_size,
+                        status="ready",
+                        uploaded_by="system",
+                        is_scanned=1 if "scanned" in s_name else 0,
+                        ocr_confidence=94 if "scanned" in s_name else 100 if "digital" in s_name else None,
+                        extraction_method="ocr_fallback" if "scanned" in s_name else "native_text" if "digital" in s_name else "duckdb" if "csv" in s_name else "vision",
+                        needs_review=1 if "scanned" in s_name else 0
+                    )
+                    db_seed.add(file_rec)
+            db_seed.commit()
+    except Exception as e:
+        logger.warning("Workspace seed warning: %s", e)
+    finally:
+        db_seed.close()
+
     # 4. SSE Single-Worker Assertion
     workers = int(os.environ.get("WEB_CONCURRENCY", "1"))
     if workers > 1:
@@ -270,6 +333,10 @@ def create_app() -> FastAPI:
 
     # Mount health checks
     app.include_router(health.router)
+
+    # Mount Member 6 Data Intelligence & OCR APIs
+    from data_intelligence.api_router import router as member6_router
+    app.include_router(member6_router)
 
     # Mount core API endpoints under /api
     app.include_router(api_router, prefix="/api")
