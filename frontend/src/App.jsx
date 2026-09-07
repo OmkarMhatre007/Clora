@@ -3,6 +3,7 @@ import Header from './components/Header';
 import Sidebar from './components/Sidebar';
 import LiveExecutionDrawer from './components/LiveExecutionDrawer';
 import LocalIntelligenceCard from './components/LocalIntelligenceCard';
+import ErrorBoundary from './components/ErrorBoundary';
 
 import WorkbenchView from './views/WorkbenchView';
 import KnowledgeGraphView from './views/KnowledgeGraphView';
@@ -71,77 +72,79 @@ export default function App() {
   };
 
   return (
-    <div className="min-h-screen bg-[#141312] text-[#f5f2ed] flex flex-col font-sans selection:bg-[#d9825b] selection:text-white">
-      {/* Top Header with Target Air-Gapped Status Widget & RBAC Role Switcher */}
-      <Header
-        workspaces={workspaces}
-        activeWorkspaceId={activeWorkspaceId}
-        onWorkspaceChange={(id) => {
-          setActiveWorkspaceId(id);
-          setActiveQuery(null);
-        }}
-        userRole={userRole}
-        onRoleChange={setUserRole}
-      />
-
-      {/* Main Layout Body */}
-      <div className="flex flex-1 overflow-hidden">
-        {/* Categorized Left Sidebar */}
-        <Sidebar
-          activeView={activeView}
-          onViewChange={setActiveView}
-          liveStats={liveStats}
+    <ErrorBoundary>
+      <div className="min-h-screen bg-[#141312] text-[#f5f2ed] flex flex-col font-sans selection:bg-[#d9825b] selection:text-white">
+        {/* Top Header with Target Air-Gapped Status Widget & RBAC Role Switcher */}
+        <Header
+          workspaces={workspaces}
+          activeWorkspaceId={activeWorkspaceId}
+          onWorkspaceChange={(id) => {
+            setActiveWorkspaceId(id);
+            setActiveQuery(null);
+          }}
+          userRole={userRole}
+          onRoleChange={setUserRole}
         />
 
-        {/* Center Main Content Area */}
-        <main className="flex-1 p-6 overflow-y-auto max-w-[1680px] mx-auto w-full transition-all">
-          <div className="grid grid-cols-1 xl:grid-cols-12 gap-6 items-start">
-            {/* Main View Area */}
-            <div className={`${activeView === 'workbench' || activeView === 'home' ? 'xl:col-span-8' : 'xl:col-span-12'}`}>
+        {/* Main Layout Body */}
+        <div className="flex flex-1 overflow-hidden">
+          {/* Categorized Left Sidebar */}
+          <Sidebar
+            activeView={activeView}
+            onViewChange={setActiveView}
+            liveStats={liveStats}
+          />
+
+          {/* Center Main Content Area */}
+          <main className="flex-1 p-6 overflow-y-auto max-w-[1680px] mx-auto w-full transition-all">
+            <div className="grid grid-cols-1 xl:grid-cols-12 gap-6 items-start">
+              {/* Main View Area */}
+              <div className={`${activeView === 'workbench' || activeView === 'home' ? 'xl:col-span-8' : 'xl:col-span-12'}`}>
+                {(activeView === 'workbench' || activeView === 'home') && (
+                  <WorkbenchView
+                    workspaceId={activeWorkspaceId}
+                    userRole={userRole}
+                    onSelectEvidence={handleSelectEvidence}
+                    onQueryUpdate={handleQueryUpdate}
+                  />
+                )}
+                {(activeView === 'graph' || activeView === 'knowledge') && (
+                  <KnowledgeGraphView />
+                )}
+                {activeView === 'data-sources' && (
+                  <DataSourcesView workspaceId={activeWorkspaceId} />
+                )}
+                {activeView === 'intelligence-agents' && (
+                  <IntelligenceAgentsView />
+                )}
+                {activeView === 'intelligence-models' && (
+                  <IntelligenceModelsView />
+                )}
+                {(activeView === 'sovereignty' || activeView === 'audit-trail' || activeView === 'settings') && (
+                  <SovereigntyView />
+                )}
+              </div>
+
+              {/* Right Execution Sidebar (When in Workbench view) */}
               {(activeView === 'workbench' || activeView === 'home') && (
-                <WorkbenchView
-                  workspaceId={activeWorkspaceId}
-                  userRole={userRole}
-                  onSelectEvidence={handleSelectEvidence}
-                  onQueryUpdate={handleQueryUpdate}
-                />
-              )}
-              {(activeView === 'graph' || activeView === 'knowledge') && (
-                <KnowledgeGraphView />
-              )}
-              {activeView === 'data-sources' && (
-                <DataSourcesView workspaceId={activeWorkspaceId} />
-              )}
-              {activeView === 'intelligence-agents' && (
-                <IntelligenceAgentsView />
-              )}
-              {activeView === 'intelligence-models' && (
-                <IntelligenceModelsView />
-              )}
-              {(activeView === 'sovereignty' || activeView === 'audit-trail' || activeView === 'settings') && (
-                <SovereigntyView />
+                <div className="xl:col-span-4 space-y-5">
+                  <LiveExecutionDrawer
+                    activeQuery={activeQuery}
+                    latestQuery={latestQuery}
+                    isProcessing={isProcessing}
+                    onViewTrace={() => setActiveView('sovereignty')}
+                  />
+                  <LocalIntelligenceCard
+                    filesCount={liveStats.filesCount}
+                    activeModel={liveStats.activeModel}
+                    onNavigate={setActiveView}
+                  />
+                </div>
               )}
             </div>
-
-            {/* Right Execution Sidebar (When in Workbench view) */}
-            {(activeView === 'workbench' || activeView === 'home') && (
-              <div className="xl:col-span-4 space-y-5">
-                <LiveExecutionDrawer
-                  activeQuery={activeQuery}
-                  latestQuery={latestQuery}
-                  isProcessing={isProcessing}
-                  onViewTrace={() => setActiveView('sovereignty')}
-                />
-                <LocalIntelligenceCard
-                  filesCount={liveStats.filesCount}
-                  activeModel={liveStats.activeModel}
-                  onNavigate={setActiveView}
-                />
-              </div>
-            )}
-          </div>
-        </main>
+          </main>
+        </div>
       </div>
-    </div>
+    </ErrorBoundary>
   );
 }

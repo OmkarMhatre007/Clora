@@ -166,13 +166,23 @@ export async function getModels() {
   try {
     const res = await fetch(`${API_BASE}/api/models`);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    return await res.json();
+    const data = await res.json();
+    const rawList = data.available_models || [];
+    const normalized = rawList.map(m => (typeof m === 'string' ? m : m?.name || 'qwen2.5:3b')).filter(Boolean);
+    const standardModels = ['qwen2.5:3b', 'llama3.2:3b', 'phi3.5:latest'];
+    const merged = Array.from(new Set([...normalized, ...standardModels]));
+
+    return {
+      ...data,
+      active_model: typeof data.active_model === 'string' ? data.active_model : 'qwen2.5:3b',
+      available_models: merged
+    };
   } catch (err) {
     console.warn('Failed to fetch models status:', err);
     return {
       status: 'online',
-      active_model: 'llama3.2:3b',
-      available_models: ['llama3.2:3b', 'qwen2.5:3b', 'phi3.5:latest']
+      active_model: 'qwen2.5:3b',
+      available_models: ['qwen2.5:3b', 'llama3.2:3b', 'phi3.5:latest']
     };
   }
 }
