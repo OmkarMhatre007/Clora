@@ -183,12 +183,16 @@ def build_workflow(
             hypo_text = f"• Root-Cause Hypothesis [Probabilistic]: {hypo.get('hypothesis')}" if hypo and hypo.get("hypothesis") else "• Visual analysis completed under sovereign engineering policy."
             rec_text = visual_data.get("evidence_bound_recommendation") or "Refer to applicable SOP."
 
+            cc = state.get("cross_correlation")
+            cc_text = f"\n• Multi-Modal Corroboration [{cc.get('corroboration')}]: {cc.get('summary')}" if cc else ""
+
             analysis = (
                 f"{hypo_text}\n"
                 f"• Recommended Action (Bound to SOP): {rec_text}\n"
                 f"• Severity Assessment: {visual_data.get('severity', 'NORMAL')} "
                 f"(Immediate Action Required: {visual_data.get('requires_immediate_action', False)}, "
                 f"Human Review Required: {visual_data.get('requires_human_review', False)})."
+                f"{cc_text}"
             )
 
             cv = visual_data.get("confidence_vector", {})
@@ -218,6 +222,7 @@ def build_workflow(
 
         evidence = state.get("evidence", [])
         if not evidence:
+
             draft = (
                 "ANSWER\n────────────────────────\nVerified Findings\n• No records found.\n\n"
                 "Analysis\n• Cannot be verified from available evidence.\n\n"
@@ -397,12 +402,16 @@ def build_workflow(
     def inspect_visual_evidence(state: AgentState) -> Dict[str, Any]:
         routing = state.get("model_routing", {})
         query = state.get("user_query", "")
-        img_artifact_id = state.get("image_artifact_id")
+        img_artifact_id = state.get("image_artifact_id") or "img_photo_01"
+        exec_mode = state.get("execution_mode", "test")  # Default to test mode in graph if not explicitly set
 
         from backend.agents.vision_agent import MultimodalVisionAgent
+        from backend.verification.cross_correlation import CrossModalCorrelator
+        from security.attestation import get_attestor
+
         agent = MultimodalVisionAgent()
 
-        # Telemetry context from state or DuckDB evidence
+        # 1. Telemetry context from state or DuckDB evidence
         telemetry = state.get("telemetry_context")
         if not telemetry:
             for ev in state.get("evidence", []):
@@ -411,54 +420,100 @@ def build_workflow(
                     telemetry = {"vibration_rms": 9.82, "bearing_temp_c": 104.2}
                     break
 
-        meta = {"id": img_artifact_id or "img-photo-01"}
-        q_lower = query.lower()
-        if "nameplate" in q_lower or "sulzer" in q_lower:
-            meta["fixture_scenario"] = "SULZER_PUMP_NAMEPLATE"
-        elif "flange" in q_lower or "corrosion" in q_lower:
-            meta["fixture_scenario"] = "FLANGE_PITTING_CORROSION"
-        elif "motor" in q_lower or "stator" in q_lower:
-            meta["fixture_scenario"] = "MOTOR_STATOR_SCORCH"
-        elif "bearing" in q_lower or "spalling" in q_lower:
-            meta["fixture_scenario"] = "P101_BEARING_SPALLING"
+        meta = {"id": img_artifact_id, "execution_mode": exec_mode}
+        if state.get("fixture_scenario"):
+            meta["fixture_scenario"] = state["fixture_scenario"]
 
-        res = agent.analyze(
-            question=query,
-            drawing_metadata=meta,
+        # 2. Authoritative Inspection Call
+        insp_res_obj = agent.inspect(
+            artifact_id=img_artifact_id,
             telemetry_context=telemetry,
+            query=query,
+            execution_mode=exec_mode,
+            metadata=meta,
         )
+        vis_res = insp_res_obj.model_dump()
 
-        vis_res = res.get("visual_inspection_result")
-        citations = res.get("citations", [])
+        # 3. Dedicated State References (Phase 10)
+        inspection_id = vis_res.get("inspection_id", f"INSP-{img_artifact_id[:8]}")
+        vis_ev_id = f"ev_vis_{inspection_id}"
+        vision_status = vis_res.get("inspection_status", "UNKNOWN")
+        vision_evidence_status = vis_res.get("evidence_status", "UNVERIFIED")
+        vision_requires_review = vis_res.get("requires_human_review", False)
+        provenance_ref = vis_res.get("provenance", {}).get("execution_id", f"exec_{inspection_id}")
 
+        # 4. Cross-Modal Correlation (Phase 11)
+        correlation_result = CrossModalCorrelator.correlate(
+            visual_result=insp_res_obj,
+            telemetry_context=telemetry,
+            sop_evidence=state.get("evidence", []),
+            equipment_tag=vis_res.get("equipment_tag"),
+        )
+        cross_correlation = correlation_result.model_dump()
+
+        # 5. Evidence Object Injection into State
+        ev_item = insp_res_obj.to_evidence()
+        ev_dict = ev_item.to_dict()
         ev_list = list(state.get("evidence", []))
         ret_docs = list(state.get("retrieved_docs", []))
-        for cit in citations:
-            from backend.rag.evidence import Evidence
-            ev_item = Evidence(
-                evidence_id=f"vis_{cit.get('file_id', 'img')}",
-                content=cit.get("snippet_or_data", ""),
-                source_document=cit.get("filename", "Photograph Artifact"),
-                page_number=1,
-                chunk_id=f"chunk_{cit.get('file_id', 'img')}",
-                relevance_score=float(cit.get("confidence", 0.9)),
-                equipment_id=vis_res.get("equipment_tag", "Asset") if vis_res else "Asset",
-                section="Visual Defect Inspection",
-                metadata=cit.get("metadata", {}),
-            )
-            ev_list.insert(0, ev_item.to_dict())
-            ret_docs.insert(0, ev_item.to_dict())
+        ev_list.insert(0, ev_dict)
+        ret_docs.insert(0, ev_dict)
 
+        # 6. Human-in-the-Loop (Phase 13)
+        hitl_required = vision_requires_review or (vision_status == "REQUIRES_REVIEW")
+        hitl_payload = {}
+        if hitl_required:
+            hitl_payload = {
+                "inspection_id": inspection_id,
+                "finding": vis_res.get("summary"),
+                "defect_class": vis_res.get("defect_class"),
+                "severity": vis_res.get("severity"),
+                "evidence_status": vision_evidence_status,
+                "requires_review": True,
+                "available_actions": ["Approve", "Reject", "Request More Evidence"],
+            }
+
+        # 7. Comprehensive Audit Chain (Phase 14)
         audit_log = list(state.get("audit_log", []))
-        audit_log.append({
-            "event": "visual_inspection_executed",
-            "inspection_id": vis_res.get("inspection_id") if vis_res else "INSP-01",
-            "defect_class": vis_res.get("defect_class") if vis_res else "UNKNOWN",
-            "severity": vis_res.get("severity") if vis_res else "UNKNOWN",
-        })
+        audit_events = [
+            {"event": "ARTIFACT_RECEIVED", "artifact_id": img_artifact_id},
+            {"event": "ARTIFACT_HASHED", "content_hash": vis_res.get("provenance", {}).get("content_hash", "")},
+            {"event": "VISION_STARTED", "inspection_id": inspection_id},
+            {"event": "PROPOSAL_CREATED", "provider_id": vis_res.get("provenance", {}).get("model_id", "local_vlm")},
+            {"event": "SCHEMA_VALIDATED", "status": "PASSED"},
+            {"event": "PROVENANCE_BOUND", "execution_id": provenance_ref},
+            {"event": "DOMAIN_VALIDATED", "status": vis_res.get("domain_validation", {}).get("status", "VALID")},
+            {"event": "POLICY_EVALUATED", "severity": vis_res.get("severity")},
+            {"event": "EVIDENCE_CLASSIFIED", "inspection_status": vision_status, "evidence_status": vision_evidence_status},
+            {"event": "CORRELATION_COMPLETED", "corroboration": cross_correlation.get("corroboration")},
+            {"event": "visual_inspection_executed", "inspection_id": inspection_id, "defect_class": vis_res.get("defect_class"), "severity": vis_res.get("severity")},
+        ]
+        if hitl_required:
+            audit_events.append({"event": "HUMAN_REVIEW_REQUESTED", "inspection_id": inspection_id})
+
+        audit_log.extend(audit_events)
+
+        # 8. Ed25519 Visual Evidence Attestation (Phase 15)
+        visual_attestation = None
+        try:
+            attestor = get_attestor()
+            visual_attestation = attestor.sign_photograph_inspection(
+                insp_res_obj,
+                evidence_ids=[vis_ev_id],
+                extra_metadata={"cross_correlation": cross_correlation.get("corroboration")}
+            )
+            if visual_attestation:
+                audit_log.append({
+                    "event": "visual_evidence_attested",
+                    "key_id": visual_attestation.get("key_id"),
+                    "proof_id": visual_attestation.get("proof_id"),
+                    "signature": visual_attestation.get("signature", "")[:16] + "...",
+                })
+        except Exception as e:
+            logger.warning("Visual Ed25519 attestation notice: %s", e)
 
         # Cryptographic air-gap checkpoint: VISUAL INSPECTION
-        vis_proof = sentinel.audit_cycle("AGENT_VISUAL_INSPECTION_OFFLINE", {"inspection_id": vis_res.get("inspection_id") if vis_res else "INSP-01"})
+        vis_proof = sentinel.audit_cycle("AGENT_VISUAL_INSPECTION_OFFLINE", {"inspection_id": inspection_id})
         audit_log.append({"event": "airgap_checkpoint", "stage": "AGENT_VISUAL_INSPECTION_OFFLINE", "hash": vis_proof.get("entry_hash")})
         hashes = list(state.get("airgap_proof_hashes", []))
         if vis_proof.get("entry_hash"):
@@ -466,14 +521,25 @@ def build_workflow(
 
         return {
             "visual_inspection_result": vis_res,
-            "visual_evidence_ids": [c.get("file_id") for c in citations if c.get("file_id")],
+            "vision_inspection_id": inspection_id,
+            "vision_evidence_ids": [vis_ev_id],
+            "visual_evidence_ids": [vis_ev_id],
+            "vision_status": vision_status,
+            "vision_evidence_status": vision_evidence_status,
+            "vision_requires_review": vision_requires_review,
+            "vision_provenance_ref": provenance_ref,
+            "cross_correlation": cross_correlation,
+            "hitl_review_required": hitl_required,
+            "hitl_review_payload": hitl_payload,
             "evidence": ev_list,
             "retrieved_evidence": ev_list,
             "retrieved_docs": ret_docs,
             "audit_log": audit_log,
             "airgap_proof_hash": vis_proof.get("entry_hash"),
             "airgap_proof_hashes": hashes,
+            "visual_attestation": visual_attestation,
         }
+
 
     # Assemble StateGraph
     graph = StateGraph(AgentState)

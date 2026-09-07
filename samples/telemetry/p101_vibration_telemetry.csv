@@ -1,0 +1,9 @@
+timestamp,equipment_id,measurement,value,unit,status
+2026-09-07T08:00:00Z,P-101,vibration_velocity_rms,3.12,mm/s,NORMAL
+2026-09-07T08:30:00Z,P-101,vibration_velocity_rms,4.45,mm/s,NORMAL
+2026-09-07T09:00:00Z,P-101,vibration_velocity_rms,6.80,mm/s,ALARM
+2026-09-07T09:15:00Z,P-101,vibration_velocity_rms,9.82,mm/s,TRIP
+2026-09-07T08:00:00Z,P-101,bearing_temp_c,62.4,C,NORMAL
+2026-09-07T08:30:00Z,P-101,bearing_temp_c,74.1,C,NORMAL
+2026-09-07T09:00:00Z,P-101,bearing_temp_c,88.5,C,ALARM
+2026-09-07T09:15:00Z,P-101,bearing_temp_c,104.2,C,TRIP

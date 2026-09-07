@@ -105,27 +105,34 @@ class VisionClient:
         image_artifact_id: Optional[str] = None,
         telemetry_context: Optional[dict[str, Any]] = None,
         metadata: Optional[dict[str, Any]] = None,
+        execution_mode: str = "production",
     ) -> dict[str, Any]:
-        """Direct inspection interface for industrial field photography."""
+        """
+        Phase 9: Clean backend boundary API -> Vision Client -> Vision Agent -> Inspection Engine -> Provider.
+        Returns PhotographInspectionResult dictionary.
+        """
         agent = self._get_agent()
+        art_id = image_artifact_id or "img_photo_01"
         meta = dict(metadata or {})
-        if image_artifact_id:
-            meta["id"] = image_artifact_id
+        meta["workspace_id"] = workspace_id
 
         if agent:
-            return agent.analyze(
-                question=question,
-                drawing_path=image_path,
-                drawing_metadata=meta,
+            insp_res = agent.inspect(
+                artifact_id=art_id,
+                image_path=image_path,
                 telemetry_context=telemetry_context,
+                query=question,
+                execution_mode="test" if execution_mode == "test" else "production",
+                metadata=meta,
             )
+            return insp_res.model_dump()
 
-        # Fallback baseline
         return {
-            "question": question,
-            "citations": [],
-            "summary": "Visual agent unavailable for photograph inspection."
+            "inspection_id": f"INSP-{art_id[:8]}",
+            "inspection_status": "INCONCLUSIVE",
+            "summary": "Vision Agent unavailable for photograph inspection."
         }
 
 
 vision_client = VisionClient()
+

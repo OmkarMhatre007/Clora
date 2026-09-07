@@ -1,0 +1,38 @@
+[
+  {
+    "sha256": "c995c63f678792a2a16c01534ddcc5218ec163dd45e5273b7e50051898685493",
+    "fixture_id": "P101_BEARING_SPALLING",
+    "equipment_id": "P-101",
+    "version": "1.0",
+    "filename": "p101_bearing.jpg",
+    "description": "Inner ring raceway fatigue spalling on Pump P-101 inboard bearing",
+    "mime_type": "image/jpeg"
+  },
+  {
+    "sha256": "589241a261448a206f4be882d1c05d130689bfbe0afcb4f05f298613ec2667da",
+    "fixture_id": "SULZER_PUMP_NAMEPLATE",
+    "equipment_id": "P-101",
+    "version": "1.0",
+    "filename": "nameplate.jpg",
+    "description": "Sulzer API 610 BB2 Centrifugal Pump metallic rating plate with design limits",
+    "mime_type": "image/jpeg"
+  },
+  {
+    "sha256": "455881a66c5e3e357f4627d208784f9c50bd4a122e3f9e9463a3c8822ae034d6",
+    "fixture_id": "FLANGE_PITTING_CORROSION",
+    "equipment_id": "E-101",
+    "version": "1.0",
+    "filename": "flange_corrosion.jpg",
+    "description": "Localized pitting corrosion on 4-inch ANSI 300# Carbon Steel flange neck",
+    "mime_type": "image/jpeg"
+  },
+  {
+    "sha256": "e778b9e2b6d1fea89f5aaae90cf3e7d5c249a543e930350c5198cf6217443b02",
+    "fixture_id": "MOTOR_STATOR_SCORCH",
+    "equipment_id": "M-101",
+    "version": "1.0",
+    "filename": "motor_stator.jpg",
+    "description": "Thermal varnish carbonization and hot spot on 415V motor stator windings",
+    "mime_type": "image/jpeg"
+  }
+]
