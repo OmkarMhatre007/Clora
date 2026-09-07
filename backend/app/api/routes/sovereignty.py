@@ -1,15 +1,18 @@
 """
 Sovereignty & Air-Gap Compliance API Routes.
 Provides live status, active socket inspection, tamper-evident hash trail,
-deterministic violation simulation, and certified network compliance attestations.
+deterministic violation simulation, certified network compliance attestations,
+real-time SSE audit stream, authentic egress metrics, and Ed25519 evidence sealing.
 """
 
+import asyncio
+import json
 import os
 import socket
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
-from fastapi import APIRouter, HTTPException, Query, status
-from fastapi.responses import PlainTextResponse
+from fastapi import APIRouter, HTTPException, Query, Request, status
+from fastapi.responses import PlainTextResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from backend.app.core.config import settings
@@ -28,6 +31,12 @@ class ProfileChangeRequest(BaseModel):
     profile: NetworkTrustProfile = Field(..., description="Target network trust profile")
     user_id: str = Field("operator_admin", min_length=1, description="Authenticated administrator ID")
     justification: str = Field(..., min_length=5, description="Operational justification for changing network security profile")
+
+
+class SignWorkflowRequest(BaseModel):
+    workflow_stage_hashes: List[str] = Field(..., description="Ordered list of SHA-256 hashes from workflow checkpoints")
+    query_id: str = Field(..., description="Unique query identifier")
+    extra_metadata: Optional[Dict[str, Any]] = None
 
 
 @router.get(
@@ -54,12 +63,142 @@ def get_sovereignty_status():
         "violations_detected": summary["violations_detected"],
         "root_integrity_hash": summary["root_integrity_hash"],
         "chain_valid": summary["chain_valid"],
+        "session_link_mode": summary.get("session_link_mode", "GENESIS"),
         "open_sockets": sockets,
         "external_api_calls_detected": summary["violations_detected"],
         "policy": "APPLICATION_LEVEL_EGRESS_ENFORCED",
         "runtime_binding": "LOCAL_SOCKETS_ONLY",
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
     }
+
+
+@router.get(
+    "/sovereignty/metrics",
+    summary="Real-Time Egress Metrics",
+)
+def get_egress_metrics():
+    """
+    Returns authentic egress metrics tracked at the application hook level.
+    Guaranteed to omit fictional bytes estimates.
+    """
+    return AirGapEnforcer.get_metrics()
+
+
+@router.get(
+    "/sovereignty/startup-validation",
+    summary="Application & Host Startup Verification Results",
+)
+def get_startup_validation(request: Request):
+    """
+    Returns the two-layer startup validation results:
+    1. Hook logic self-test (Python process)
+    2. OS-level outbound firewall deny rule (Host machine)
+    3. Ollama cloud feature isolation
+    4. Activation-order cleanliness
+    """
+    val = getattr(request.app.state, "startup_validation", None)
+    if val is None:
+        sentinel = get_sentinel(str(settings.AIRGAP_LOG_PATH))
+        from backend.app.main import AirGapStartupValidator
+        val = AirGapStartupValidator.run(sentinel)
+    return val
+
+
+@router.get(
+    "/sovereignty/trust-boundary",
+    summary="Layered Sovereignty Trust Boundary Specification",
+)
+def get_trust_boundary():
+    """Returns structured JSON of the three-layer trust model."""
+    return {
+        "title": "CLORA Layered Sovereignty Trust Boundary",
+        "layer_1_os": {
+            "name": "Host OS & Kernel Enforcement",
+            "role": "Actual enforcement boundary",
+            "mechanisms": ["CLORA_DENY_OUTBOUND outbound deny firewall rule", "Docker --network none"],
+        },
+        "layer_2_instrumentation": {
+            "name": "Process-Level Instrumentation (AirGapEnforcer)",
+            "role": "Application-level monitoring & preventive socket interception",
+            "sees": [
+                "All socket.connect calls in FastAPI process",
+                "All socket.getaddrinfo calls in FastAPI process",
+                "Periodic snapshots of process socket table"
+            ],
+            "does_not_see": [
+                "Ollama daemon binary (mitigated via OLLAMA_NO_CLOUD=1)",
+                "Docker sandbox containers (mitigated via --network none)",
+                "Browser / frontend traffic"
+            ],
+        },
+        "layer_3_evidence": {
+            "name": "Cryptographic Audit Evidence",
+            "role": "Tamper-evident proof generation",
+            "mechanisms": [
+                "SHA-256 hash chain (airgap_proof_log.jsonl)",
+                "Ed25519 digital signatures (.clora-proof)"
+            ],
+        }
+    }
+
+
+@router.get(
+    "/sovereignty/stream",
+    summary="Server-Sent Events (SSE) Live Hash Chain Stream",
+)
+async def get_sovereignty_stream(request: Request, max_events: Optional[int] = None):
+    """
+    Streams live SHA-256 hash chain entries via Server-Sent Events (SSE).
+    Single-worker uvicorn deployment is required for in-memory queue.
+    """
+    if not getattr(request.app.state, "sse_available", True):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="SSE stream unavailable: multi-worker deployment detected. Single worker required.",
+        )
+
+    sentinel = get_sentinel(str(settings.AIRGAP_LOG_PATH))
+    loop = asyncio.get_running_loop()
+    queue: asyncio.Queue = asyncio.Queue(maxsize=100)
+
+    def listener(entry: Dict[str, Any]):
+        loop.call_soon_threadsafe(queue.put_nowait, entry)
+
+    sentinel.subscribe(listener)
+
+    async def event_generator():
+        yielded = 0
+        try:
+            # Send initial connected event
+            yield f"event: connected\ndata: {json.dumps({'status': 'STREAM_CONNECTED', 'head_hash': sentinel.get_current_hash()})}\n\n"
+            yielded += 1
+            if max_events and yielded >= max_events:
+                return
+
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    entry = await asyncio.wait_for(queue.get(), timeout=15.0)
+                    yield f"event: audit_block\ndata: {json.dumps(entry)}\n\n"
+                    yielded += 1
+                    if max_events and yielded >= max_events:
+                        break
+                except asyncio.TimeoutError:
+                    # Heartbeat keep-alive ping
+                    yield f": keep-alive\n\n"
+        finally:
+            sentinel.unsubscribe(listener)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.get(
@@ -114,8 +253,8 @@ def simulate_policy_violation(target_ip: str = "1.1.1.1", target_port: int = 443
     if not enforcer_active:
         AirGapEnforcer.activate(
             profile=NetworkTrustProfile.STRICT_AIRGAP,
-            on_violation=lambda ip, port, prof: sentinel.log_violation(
-                ip, port, f"Simulated egress test to {ip}:{port} intercepted by {prof} policy."
+            on_violation=lambda ip, port, prof, is_self_test=False: sentinel.log_violation(
+                ip, port, f"Simulated egress test to {ip}:{port} intercepted by {prof} policy.", is_self_test
             ),
         )
 
@@ -260,6 +399,26 @@ def sign_report_endpoint(req: SignReportRequest):
 
 
 @router.post(
+    "/sovereignty/sign-workflow",
+    summary="Cryptographically Seal Multi-Agent Workflow Hash Chain",
+)
+def sign_workflow_endpoint(req: SignWorkflowRequest):
+    """
+    Signs the sequence of workflow stage airgap checkpoint hashes using Ed25519.
+    Returns HTTP 200 with sealed: false on failure (best-effort; never raises exception to caller).
+    """
+    from security.attestation import get_attestor
+    try:
+        attestor = get_attestor(str(settings.KEYS_DIR))
+        res = attestor.sign_workflow_chain(req.workflow_stage_hashes, req.query_id, req.extra_metadata)
+        if res:
+            return res
+        return {"sealed": False, "reason": "Attestation signing returned empty"}
+    except Exception as e:
+        return {"sealed": False, "reason": f"Attestation signing error: {str(e)}"}
+
+
+@router.post(
     "/sovereignty/attestation/verify",
     summary="Independently Verify .clora-proof Package",
 )
@@ -323,4 +482,3 @@ def get_sample_proof():
         sources=["Pump_P101_Maintenance.pdf", "CDU_Vibration_Telemetry.csv"],
         model="qwen2.5:3b (Local Offline)",
     )
-

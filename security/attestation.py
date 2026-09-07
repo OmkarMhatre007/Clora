@@ -186,6 +186,55 @@ class EvidenceAttestor:
 
         return proof_package
 
+    def sign_workflow_chain(
+        self,
+        hashes: List[str],
+        query_id: str,
+        extra_metadata: Optional[Dict[str, Any]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Signs the ordered chain of air-gap stage hashes for a multi-agent reasoning workflow.
+        Returns a sealed attestation dict, or None if signing fails (caller treats as best-effort).
+        """
+        try:
+            timestamp = datetime.now(timezone.utc).isoformat()
+            canonical_payload: Dict[str, Any] = {
+                "query_id": query_id,
+                "workflow_stage_hashes": hashes,
+                "system": "CLORA Sovereign Industrial AI Workbench",
+                "organization": "Mangalore Refinery and Petrochemicals Limited (MRPL SIH26117)",
+                "generated_at": timestamp,
+            }
+            if extra_metadata:
+                canonical_payload["metadata"] = extra_metadata
+
+            canonical_bytes = canonicalize_payload(canonical_payload)
+            chain_sha256 = hashlib.sha256(canonical_bytes).hexdigest()
+
+            priv_key = self.key_manager.get_private_key()
+            raw_signature = priv_key.sign(canonical_bytes)
+            signature_b64 = base64.b64encode(raw_signature).decode("utf-8")
+
+            key_id = self.key_manager.get_key_id()
+            public_key_pem = self.key_manager.get_public_key_pem()
+
+            return {
+                "sealed": True,
+                "schema_version": "1.0",
+                "proof_id": f"PROOF-WORKFLOW-{query_id}-{key_id}",
+                "key_id": key_id,
+                "signer": "CLORA Sovereign Local Instance",
+                "algorithm": "Ed25519",
+                "generated_at": timestamp,
+                "content_sha256": chain_sha256,
+                "canonical_payload": canonical_payload,
+                "signature": signature_b64,
+                "public_key_pem": public_key_pem,
+            }
+        except Exception as e:
+            logger.error("Best-effort workflow chain attestation signing failed: %s", e)
+            return None
+
     def export_clora_proof(self, proof_package: Dict[str, Any], output_path: str) -> str:
         """Writes the signed evidence package to disk as a .clora-proof file."""
         abs_path = os.path.abspath(output_path)

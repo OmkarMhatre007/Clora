@@ -65,6 +65,82 @@ def check_docker_sandbox() -> tuple[bool, str]:
         return False, f"[RED FAIL] Failed inspecting Docker sandbox image: {e}"
 
 
+def check_npm_telemetry() -> tuple[bool, str]:
+    """Verify npm send-metrics is disabled."""
+    try:
+        proc = subprocess.run(
+            ["npm", "config", "get", "send-metrics"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=3.0,
+        )
+        val = proc.stdout.strip().lower()
+        if val in ("false", ""):
+            return True, "[GREEN PASS] npm send-metrics disabled (offline safe)."
+        return False, f"[YELLOW WARN] npm send-metrics is '{val}'. Run: npm config set send-metrics false --global"
+    except Exception as e:
+        return True, f"[INFO] npm not found or check skipped: {e}"
+
+
+def check_vite_local_only() -> tuple[bool, str]:
+    """Verify frontend/vite.config.js binds strictly to localhost (127.0.0.1)."""
+    vite_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "frontend", "vite.config.js"))
+    if not os.path.exists(vite_path):
+        return False, "[RED FAIL] frontend/vite.config.js not found."
+    try:
+        with open(vite_path, "r", encoding="utf-8") as f:
+            content = f.read()
+        if "'0.0.0.0'" in content or '"0.0.0.0"' in content:
+            return False, "[RED FAIL] Vite config exposes host to 0.0.0.0 (LAN reachable)."
+        if "host: '127.0.0.1'" in content or 'host: "127.0.0.1"' in content or "host: 'localhost'" in content:
+            return True, "[GREEN PASS] Vite configured with strict localhost binding (127.0.0.1)."
+        return True, "[GREEN PASS] Vite defaults to localhost (no external host binding detected)."
+    except Exception as e:
+        return False, f"[RED FAIL] Error reading vite.config.js: {e}"
+
+
+def check_os_firewall_rule() -> tuple[bool, str]:
+    """Validates presence of host outbound deny rule (Layer 1 OS enforcement)."""
+    import platform
+    os_name = platform.system()
+    if os_name == "Windows":
+        try:
+            ps_cmd = (
+                "$r = Get-NetFirewallRule -DisplayName 'CLORA_DENY_OUTBOUND' -ErrorAction SilentlyContinue; "
+                "if ($r) { [int]$r.Action } else { -1 }"
+            )
+            proc = subprocess.run(
+                ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_cmd],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=4.0,
+            )
+            code = proc.stdout.strip()
+            if code == "2":
+                return True, "[GREEN PASS] Windows Firewall rule 'CLORA_DENY_OUTBOUND' is active (Action: Block)."
+            elif code != "-1" and code != "":
+                return False, f"[YELLOW WARN] 'CLORA_DENY_OUTBOUND' found with Action code {code} (not Block)."
+            else:
+                return False, (
+                    "[YELLOW WARN] 'CLORA_DENY_OUTBOUND' outbound deny rule not found.\n"
+                    "           Application-level instrumentation active. For OS enforcement, run:\n"
+                    "           'powershell -ExecutionPolicy Bypass -File scripts/setup_firewall_rule.ps1' as Admin."
+                )
+        except Exception as e:
+            return False, f"[YELLOW WARN] Failed querying Windows Firewall: {e}"
+    elif os_name == "Linux":
+        try:
+            proc = subprocess.run(["sudo", "iptables", "-S", "OUTPUT"], capture_output=True, text=True, timeout=3.0)
+            if proc.returncode == 0 and ("CLORA_DENY_OUTBOUND" in proc.stdout or "-P OUTPUT DROP" in proc.stdout):
+                return True, "[GREEN PASS] Linux iptables outbound drop rule active."
+            return False, "[YELLOW WARN] No iptables outbound drop rule found. Run scripts/setup_firewall_rule.sh."
+        except Exception as e:
+            return False, f"[YELLOW WARN] Failed querying iptables: {e}"
+    return True, f"[INFO] OS {os_name} firewall check skipped."
+
+
 def check_ollama_runtime() -> tuple[bool, list[str]]:
     """Checks Ollama connection and pulled models."""
     reachable = default_runtime.is_endpoint_reachable(timeout_sec=1.0)
@@ -143,6 +219,24 @@ def main():
             all_green = False
     except Exception as e:
         print(f"    -> [YELLOW WARN] Audit logger check skipped: {e}")
+
+    # 6. npm Telemetry Setting Check
+    print("\n[*] 6. Verifying npm Telemetry (send-metrics) Configuration...")
+    npm_ok, npm_msg = check_npm_telemetry()
+    print(f"    -> {npm_msg}")
+
+    # 7. Frontend Localhost-Only Binding Check
+    print("\n[*] 7. Verifying Frontend Dev Server Localhost-Only Binding (vite.config.js)...")
+    vite_ok, vite_msg = check_vite_local_only()
+    print(f"    -> {vite_msg}")
+    if not vite_ok:
+        all_green = False
+
+    # 8. Layer 1 OS Outbound Deny Rule Check
+    print("\n[*] 8. Verifying Layer 1 OS Outbound Firewall Rule (CLORA_DENY_OUTBOUND)...")
+    fw_ok, fw_msg = check_os_firewall_rule()
+    print(f"    -> {fw_msg}")
+    # Note: Missing host rule warns but does not fail Python preflight if application instrumentation is active
 
     # Summary
     print_section("READINESS SUMMARY")
