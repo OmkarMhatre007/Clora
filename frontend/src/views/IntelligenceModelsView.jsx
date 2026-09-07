@@ -1,10 +1,10 @@
 import React, { useState, useEffect } from 'react';
-import { Cpu, Zap, Activity, HardDrive, CheckCircle2, Check, RefreshCw } from 'lucide-react';
+import { Cpu, Zap, Activity, HardDrive, CheckCircle2, Check, RefreshCw, Layers, ShieldCheck } from 'lucide-react';
 import { getModels, getRegisteredModels, selectActiveModel } from '../services/api';
 
 export default function IntelligenceModelsView() {
-  const [activeModel, setActiveModel] = useState('llama3.2:3b');
-  const [availableModels, setAvailableModels] = useState([]);
+  const [activeModel, setActiveModel] = useState('qwen2.5:3b');
+  const [availableModels, setAvailableModels] = useState(['qwen2.5:3b', 'llama3.2:3b', 'phi3.5:latest']);
   const [registeredProfiles, setRegisteredProfiles] = useState([]);
   const [loading, setLoading] = useState(false);
   const [switching, setSwitching] = useState(false);
@@ -18,10 +18,22 @@ export default function IntelligenceModelsView() {
         getRegisteredModels()
       ]);
       if (modelsData) {
-        if (modelsData.active_model) setActiveModel(modelsData.active_model);
-        setAvailableModels(modelsData.available_models || ['llama3.2:3b', 'qwen2.5:3b', 'phi3.5:latest']);
+        if (typeof modelsData.active_model === 'string') {
+          setActiveModel(modelsData.active_model);
+        } else if (modelsData.active_model?.name) {
+          setActiveModel(modelsData.active_model.name);
+        }
+
+        if (Array.isArray(modelsData.available_models)) {
+          const names = modelsData.available_models.map(m =>
+            typeof m === 'string' ? m : m?.name || m?.model_id || 'qwen2.5:3b'
+          ).filter(Boolean);
+          if (names.length > 0) {
+            setAvailableModels(Array.from(new Set(names)));
+          }
+        }
       }
-      if (profiles) {
+      if (profiles && Array.isArray(profiles)) {
         setRegisteredProfiles(profiles);
       }
     } catch (err) {
@@ -36,14 +48,15 @@ export default function IntelligenceModelsView() {
   }, []);
 
   const handleSelectModel = async (modelName) => {
+    const nameStr = typeof modelName === 'string' ? modelName : modelName?.name || 'qwen2.5:3b';
     setSwitching(true);
     setNotice(null);
     try {
-      await selectActiveModel(modelName);
-      setActiveModel(modelName);
+      await selectActiveModel(nameStr);
+      setActiveModel(nameStr);
       setNotice({
         type: 'success',
-        message: `Active sovereign model successfully switched to '${modelName}' with zero cloud fallback.`
+        message: `Active model successfully switched to '${nameStr}' with zero cloud fallback.`
       });
       await loadModels();
     } catch (err) {
@@ -58,6 +71,7 @@ export default function IntelligenceModelsView() {
 
   const modelMetadataMap = {
     'llama3.2:3b': {
+      displayName: 'Llama 3.2 3B Instruct',
       role: 'General Multi-Agent Reasoning & Failure Root-Cause Analysis',
       ttft: '0.48 s',
       throughput: '12.4 tok/s',
@@ -66,6 +80,7 @@ export default function IntelligenceModelsView() {
       tier: 'Standard (1B-4B)'
     },
     'qwen2.5:3b': {
+      displayName: 'Qwen 2.5 3B Instruct',
       role: 'Long-Context Document Synthesis & Python Sandbox Code Engine',
       ttft: '0.52 s',
       throughput: '11.8 tok/s',
@@ -74,12 +89,31 @@ export default function IntelligenceModelsView() {
       tier: 'Standard (1B-4B)'
     },
     'phi3.5:latest': {
+      displayName: 'Phi 3.5 Mini 3.8B',
       role: 'Mathematical Formula Verification & Step-by-Step Logic',
       ttft: '0.61 s',
       throughput: '9.8 tok/s',
       vram: '3.4 GB',
       precision: 'GGUF Q4_K_M',
       tier: 'Standard (1B-4B)'
+    },
+    'qwen2.5-coder:1.5b': {
+      displayName: 'Qwen 2.5 Coder 1.5B',
+      role: 'Fast Lightweight SQL Scripting & Data Transformation',
+      ttft: '0.28 s',
+      throughput: '18.2 tok/s',
+      vram: '1.6 GB',
+      precision: 'GGUF Q4_K_M',
+      tier: 'Lightweight (1B-2B)'
+    },
+    'llama3.2:1b': {
+      displayName: 'Llama 3.2 1B Fast Triage',
+      role: 'High-Speed Query Router, Intent Classifier & Atomic Extraction',
+      ttft: '0.22 s',
+      throughput: '22.0 tok/s',
+      vram: '1.2 GB',
+      precision: 'GGUF Q4_K_M',
+      tier: 'Lightweight (1B-2B)'
     }
   };
 
@@ -127,9 +161,11 @@ export default function IntelligenceModelsView() {
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
         {/* Model Cards Grid */}
         <div className="lg:col-span-8 grid grid-cols-1 md:grid-cols-2 gap-4">
-          {availableModels.map((modName) => {
+          {availableModels.map((modItem) => {
+            const modName = typeof modItem === 'string' ? modItem : modItem?.name || 'qwen2.5:3b';
             const isActive = activeModel === modName;
             const meta = modelMetadataMap[modName] || {
+              displayName: modName,
               role: 'Quantized Open-Weight Local Inference',
               ttft: '0.50 s',
               throughput: '10.0 tok/s',
@@ -147,7 +183,7 @@ export default function IntelligenceModelsView() {
               >
                 <div className="space-y-1.5">
                   <div className="flex items-center justify-between">
-                    <h3 className="text-sm font-bold text-[#f5f2ed] font-mono">{modName}</h3>
+                    <h3 className="text-sm font-bold text-[#f5f2ed] font-mono">{meta.displayName || modName}</h3>
                     {isActive ? (
                       <span className="status-pill-copper text-[9px]">ACTIVE INFERENCE</span>
                     ) : (

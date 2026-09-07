@@ -26,6 +26,7 @@ import {
   getWorkspaceFiles,
   getWorkspaceQueries,
   getModels,
+  selectActiveModel,
   uploadFile,
   downloadQueryDocx
 } from '../services/api';
@@ -41,7 +42,7 @@ export default function WorkbenchView({
   const [result, setResult] = useState(null);
   const [recentQueries, setRecentQueries] = useState([]);
   const [workspaceFiles, setWorkspaceFiles] = useState([]);
-  const [availableModels, setAvailableModels] = useState([]);
+  const [availableModels, setAvailableModels] = useState(['llama3.2:3b', 'qwen2.5:3b', 'phi3.5:latest']);
   const [activeModel, setActiveModel] = useState('llama3.2:3b');
 
   // Modals & Selection States
@@ -49,6 +50,8 @@ export default function WorkbenchView({
   const [attachedFiles, setAttachedFiles] = useState([]);
   const [selectedTools, setSelectedTools] = useState(['chromadb', 'duckdb', 'causal_verifier', 'docx_exporter']);
   const fileInputRef = useRef(null);
+
+  const activeModelName = typeof activeModel === 'string' ? activeModel : activeModel?.name || 'llama3.2:3b';
 
   // Load live files, models, and queries on mount
   const loadData = async () => {
@@ -61,8 +64,13 @@ export default function WorkbenchView({
       setWorkspaceFiles(files || []);
       setRecentQueries(queries || []);
       if (modelsData) {
-        setAvailableModels(modelsData.available_models || ['llama3.2:3b', 'qwen2.5:3b', 'phi3.5:latest']);
-        if (modelsData.active_model) setActiveModel(modelsData.active_model);
+        const rawList = Array.isArray(modelsData.available_models) ? modelsData.available_models : ['llama3.2:3b', 'qwen2.5:3b', 'phi3.5:latest'];
+        const normalized = rawList.map(m => typeof m === 'string' ? m : m?.name || 'qwen2.5:3b').filter(Boolean);
+        setAvailableModels(Array.from(new Set(normalized)));
+        if (modelsData.active_model) {
+          const actName = typeof modelsData.active_model === 'string' ? modelsData.active_model : modelsData.active_model?.name || 'llama3.2:3b';
+          setActiveModel(actName);
+        }
       }
     } catch (err) {
       console.warn('Error loading workbench initial data:', err);
@@ -235,7 +243,7 @@ export default function WorkbenchView({
                 className="btn-outline text-xs py-1 px-2.5 flex items-center gap-1.5"
               >
                 <Wrench size={13} />
-                <span>Model: {activeModel.split(':')[0]}</span>
+                <span>Model: {activeModelName.split(':')[0]}</span>
               </button>
             </div>
 
@@ -430,20 +438,31 @@ export default function WorkbenchView({
             <div className="space-y-2">
               <span className="text-[11px] font-mono text-[#6d675e] uppercase">Active Local LLM:</span>
               <div className="space-y-1.5">
-                {availableModels.map((m) => (
-                  <div
-                    key={m}
-                    onClick={() => setActiveModel(m)}
-                    className={`p-2.5 rounded-xl border transition-all cursor-pointer flex items-center justify-between ${
-                      activeModel === m
-                        ? 'bg-[#291f19] border-[#d9825b] text-[#f5f2ed]'
-                        : 'bg-[#181614] border-[#2e2a25] text-[#a09a90] hover:border-[#3d3830]'
-                    }`}
-                  >
-                    <div className="text-xs font-bold">{m}</div>
-                    {activeModel === m && <Check size={14} className="text-[#d9825b]" />}
-                  </div>
-                ))}
+                {availableModels.map((m) => {
+                  const mName = typeof m === 'string' ? m : m?.name || 'qwen2.5:3b';
+                  const isSelected = activeModelName === mName;
+                  return (
+                    <div
+                      key={mName}
+                      onClick={async () => {
+                        setActiveModel(mName);
+                        try {
+                          await selectActiveModel(mName);
+                        } catch (e) {
+                          console.warn('Model switch sync warning:', e);
+                        }
+                      }}
+                      className={`p-2.5 rounded-xl border transition-all cursor-pointer flex items-center justify-between ${
+                        isSelected
+                          ? 'bg-[#291f19] border-[#d9825b] text-[#f5f2ed]'
+                          : 'bg-[#181614] border-[#2e2a25] text-[#a09a90] hover:border-[#3d3830]'
+                      }`}
+                    >
+                      <div className="text-xs font-bold font-mono">{mName}</div>
+                      {isSelected && <Check size={14} className="text-[#d9825b]" />}
+                    </div>
+                  );
+                })}
               </div>
             </div>
 
