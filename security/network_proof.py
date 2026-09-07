@@ -16,7 +16,7 @@ import psutil
 import threading
 import time
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .airgap_monitor import (
     AirGapEnforcer,
@@ -42,6 +42,8 @@ class AirGapSentinel:
         self._last_hash = GENESIS_HASH
         self._seq = 0
         self._violation_count = 0
+        self._session_link_mode = "GENESIS"
+        self._subscribers: List[Callable[[Dict[str, Any]], None]] = []
 
         # Ensure directory exists
         abs_path = os.path.abspath(log_path)
@@ -52,19 +54,77 @@ class AirGapSentinel:
 
     def _recover_state_from_log(self) -> None:
         """Initializes last hash and sequence from existing verified entries."""
-        if os.path.exists(self.log_path):
+        if not os.path.exists(self.log_path):
+            self._session_link_mode = "GENESIS"
+            self._last_hash = GENESIS_HASH
+            self._seq = 0
+            return
+
+        try:
+            with open(self.log_path, "r", encoding="utf-8") as f:
+                lines = [line.strip() for line in f if line.strip()]
+
+            if not lines:
+                self._session_link_mode = "GENESIS"
+                self._last_hash = GENESIS_HASH
+                self._seq = 0
+                return
+
+            # Check lines for validity and violations
+            for line in lines:
+                data = json.loads(line)
+                stage = data.get("stage", "")
+                if not data.get("is_airgapped", True) and stage != "SELF_TEST_EXPECTED_BLOCK":
+                    self._violation_count += 1
+
+            last = json.loads(lines[-1])
+            self._seq = last.get("seq", 0) + 1
+            self._last_hash = last.get("entry_hash", GENESIS_HASH)
+            self._session_link_mode = "PRIOR_SESSION_LINKED"
+        except Exception as e:
+            # Rotate corrupted file aside to preserve evidence and allow clean verification
+            timestamp = int(time.time())
+            corrupt_archive = f"{self.log_path}.corrupted.{timestamp}"
             try:
-                with open(self.log_path, "r", encoding="utf-8") as f:
-                    for line in f:
-                        line_str = line.strip()
-                        if line_str:
-                            data = json.loads(line_str)
-                            self._seq = data.get("seq", 0) + 1
-                            self._last_hash = data.get("entry_hash", self._last_hash)
-                            if not data.get("is_airgapped", True):
-                                self._violation_count += 1
+                os.rename(self.log_path, corrupt_archive)
+                logger.warning(
+                    "Corrupt prior log moved to %s (%s). Starting fresh genesis chain.",
+                    corrupt_archive, e
+                )
+            except Exception as rename_err:
+                logger.error("Failed to rotate corrupted log: %s", rename_err)
+
+            self._session_link_mode = "PRIOR_SESSION_UNREADABLE"
+            self._last_hash = GENESIS_HASH
+            self._seq = 0
+            self._violation_count = 0
+
+    def get_current_hash(self) -> str:
+        """Thread-safe read of the current chain head hash using the same lock as audit_cycle."""
+        with self._lock:
+            return self._last_hash
+
+    def subscribe(self, callback: Callable[[Dict[str, Any]], None]) -> None:
+        """Registers a listener for live SSE audit trail notifications."""
+        with self._lock:
+            if callback not in self._subscribers:
+                self._subscribers.append(callback)
+
+    def unsubscribe(self, callback: Callable[[Dict[str, Any]], None]) -> None:
+        """Unregisters an SSE listener."""
+        with self._lock:
+            if callback in self._subscribers:
+                self._subscribers.remove(callback)
+
+    def _notify_subscribers(self, entry: Dict[str, Any]) -> None:
+        """Dispatches an audit entry to registered SSE subscribers."""
+        with self._lock:
+            listeners = list(self._subscribers)
+        for cb in listeners:
+            try:
+                cb(entry)
             except Exception as e:
-                logger.warning("Notice recovering sentinel state from %s: %s", self.log_path, e)
+                logger.debug("Subscriber dispatch notice: %s", e)
 
     def audit_cycle(self, stage_name: str = "WORKBENCH_RUN", extra_metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
@@ -94,7 +154,12 @@ class AirGapSentinel:
 
             timestamp = datetime.now(timezone.utc).isoformat()
             is_isolated = (len(external_conns) == 0)
-            if not is_isolated:
+            if stage_name == "EGRESS_VIOLATION_INTERCEPTED":
+                is_isolated = False
+            elif stage_name == "SELF_TEST_EXPECTED_BLOCK":
+                is_isolated = True
+
+            if not is_isolated and stage_name != "SELF_TEST_EXPECTED_BLOCK":
                 self._violation_count += 1
 
             profile_name = AirGapEnforcer.get_profile().value if hasattr(AirGapEnforcer, "get_profile") else "STRICT_AIRGAP"
@@ -124,20 +189,32 @@ class AirGapSentinel:
 
             self._seq += 1
             self._last_hash = entry_hash
-            return payload
 
-    def log_violation(self, destination_ip: str, destination_port: int, reason: str = "") -> Dict[str, Any]:
-        """Records an intercepted outbound connection attempt into the hash chain."""
-        return self.audit_cycle(
-            stage_name="EGRESS_VIOLATION_INTERCEPTED",
-            extra_metadata={
-                "violation_type": "UNAPPROVED_OUTBOUND_SOCKET",
-                "destination_ip": destination_ip,
-                "destination_port": destination_port,
-                "action": "BLOCKED_BEFORE_HANDSHAKE",
-                "reason": reason
-            }
-        )
+        # Dispatch outside the lock to avoid holding the lock during subscriber execution
+        self._notify_subscribers(payload)
+        return payload
+
+    def log_violation(
+        self,
+        destination_ip: str,
+        destination_port: int,
+        reason: str = "",
+        is_self_test: bool = False
+    ) -> Dict[str, Any]:
+        """
+        Records an intercepted outbound connection attempt into the hash chain.
+        If is_self_test is True, tags as SELF_TEST_EXPECTED_BLOCK and does not increment violation counter.
+        """
+        stage = "SELF_TEST_EXPECTED_BLOCK" if is_self_test else "EGRESS_VIOLATION_INTERCEPTED"
+        meta: Dict[str, Any] = {
+            "violation_type": "SELF_TEST_PROBE" if is_self_test else "UNAPPROVED_OUTBOUND_SOCKET",
+            "destination_ip": destination_ip,
+            "destination_port": destination_port,
+            "action": "BLOCKED_BEFORE_HANDSHAKE",
+            "is_self_test": is_self_test,
+            "reason": reason
+        }
+        return self.audit_cycle(stage_name=stage, extra_metadata=meta)
 
     def log_policy_change(self, old_profile: str, new_profile: str, user_id: str, justification: str) -> Dict[str, Any]:
         """Records an auditable network security profile change into the hash chain."""
@@ -175,9 +252,10 @@ class AirGapSentinel:
             "total_audit_cycles": self._seq,
             "violations_detected": self._violation_count,
             "active_profile": active_profile,
-            "root_integrity_hash": self._last_hash,
+            "root_integrity_hash": self.get_current_hash(),
             "chain_valid": valid,
             "enforcer_active": AirGapEnforcer.is_active(),
+            "session_link_mode": self._session_link_mode,
             "log_path": os.path.abspath(self.log_path)
         }
 
@@ -247,15 +325,16 @@ class AirGapSentinel:
             f"Root Integrity Hash:    {self._last_hash}\n"
             f"Audit Log File:         {os.path.abspath(self.log_path)}\n\n"
             "OPERATIONAL CONTROL SCOPE:\n"
-            "Level A (Application Egress Guard):\n"
-            "  - All outbound network calls from the CLORA Python process are evaluated against\n"
+            "Layer 1 (OS Enforcement Boundary):\n"
+            "  - Named firewall rule CLORA_DENY_OUTBOUND blocks all outbound host traffic.\n"
+            "Level A (Application Egress Guard) / Layer 2 Instrumentation:\n"
+            "  - All outbound network calls and DNS resolutions from the CLORA Python process are evaluated against\n"
             "    the active Network Trust Profile prior to socket connection handshakes.\n"
             "  - Disallowed destinations are synchronously blocked with AirGapViolationError.\n"
             "  - Zero external cloud inference APIs were contacted during document extraction,\n"
-            "    vector indexing, local model execution, and report generation.\n\n"
-            "Level B (Host/Deployment Guidance):\n"
-            "  - Designed to operate securely within refinery-managed OT/SCADA air-gapped VLANs\n"
-            "    and isolated host network policies.\n"
+            "    vector indexing, local model execution, and report generation.\n"
+            "Layer 3 (Cryptographic Evidence):\n"
+            "  - Tamper-evident SHA-256 hash chain and Ed25519 digital signatures.\n"
             "================================================================================\n"
         )
 

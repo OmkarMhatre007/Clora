@@ -13,7 +13,7 @@ class Settings(BaseSettings):
     DEBUG: bool = True
     DATABASE_URL: str = "sqlite:///./storage/indusai.db"
     STORAGE_DIR: Path = Path("./storage")
-    OLLAMA_BASE_URL: str = "http://localhost:11434"
+    OLLAMA_BASE_URL: str = "http://127.0.0.1:11434"
     OLLAMA_MODEL: str = "qwen2.5:3b"
     OLLAMA_TIMEOUT_SEC: float = 60.0
     INTERNAL_SERVICE_KEY: str = "indusai-internal-worker-key-dev"
@@ -26,6 +26,10 @@ class Settings(BaseSettings):
     AIRGAP_AUDIT_INTERVAL_SEC: float = 5.0
     AIRGAP_LOG_PATH: Path = Path("./storage/airgap_proof_log.jsonl")
     AIRGAP_ATTESTATION_PATH: Path = Path("./storage/CLORA_NETWORK_COMPLIANCE_ATTESTATION.txt")
+    AIRGAP_STARTUP_VALIDATION: bool = True
+    AIRGAP_DNS_HOOK_ENABLED: bool = True
+    AIRGAP_OS_DENY_RULE_NAME: str = "CLORA_DENY_OUTBOUND"
+    AIRGAP_STRICT_MODE: str = "warn_only"
     KEYS_DIR: Path = Path("./storage/keys")
 
     ALLOWED_EXTENSIONS: list[str] = [

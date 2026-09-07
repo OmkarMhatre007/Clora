@@ -24,6 +24,7 @@ from .airgap_monitor import (
     AddressValidator,
     AirGapViolationError,
     AirGapEnforcer,
+    EgressMetrics,
     get_active_socket_snapshot,
 )
 
@@ -55,6 +56,7 @@ __all__ = [
     "AddressValidator",
     "AirGapViolationError",
     "AirGapEnforcer",
+    "EgressMetrics",
     "get_active_socket_snapshot",
     "AirGapSentinel",
     "BackgroundNetworkAuditor",

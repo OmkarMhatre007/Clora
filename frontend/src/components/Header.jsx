@@ -1,8 +1,11 @@
 import React, { useState, useEffect } from 'react';
-import { ShieldCheck, User, Cpu } from 'lucide-react';
+import { ShieldCheck, User, Cpu, AlertTriangle } from 'lucide-react';
+import { getEgressMetrics, getSovereigntyStatus } from '../services/api';
 
 export default function Header({ activeWorkspace = 'CDU Unit-02 Maintenance', userRole = 'Maintenance Engineer' }) {
-  const [timeStr, setTimeStr] = useState('09:42 AM / 31 Aug 2026');
+  const [timeStr, setTimeStr] = useState('');
+  const [metrics, setMetrics] = useState({ blocked_attempts_count: 0, approved_connections_count: 0 });
+  const [isAirGapped, setIsAirGapped] = useState(true);
 
   useEffect(() => {
     const updateTime = () => {
@@ -14,6 +17,28 @@ export default function Header({ activeWorkspace = 'CDU Unit-02 Maintenance', us
     updateTime();
     const interval = setInterval(updateTime, 30000);
     return () => clearInterval(interval);
+  }, []);
+
+  useEffect(() => {
+    let mounted = true;
+    const fetchSovereigntyData = async () => {
+      try {
+        const [m, s] = await Promise.all([getEgressMetrics(), getSovereigntyStatus()]);
+        if (mounted) {
+          if (m) setMetrics(m);
+          if (s) setIsAirGapped(s.is_air_gapped !== false);
+        }
+      } catch (err) {
+        // Retain default safe values
+      }
+    };
+
+    fetchSovereigntyData();
+    const metricInterval = setInterval(fetchSovereigntyData, 5000);
+    return () => {
+      mounted = false;
+      clearInterval(metricInterval);
+    };
   }, []);
 
   return (
@@ -39,23 +64,41 @@ export default function Header({ activeWorkspace = 'CDU Unit-02 Maintenance', us
         <div className="flex items-center bg-[#1c1a17] border border-[#2e2b26] rounded-xl px-4 py-1.5 shadow-inner">
           {/* Status Indicator */}
           <div className="flex items-center gap-2.5 pr-4 border-r border-[#2e2a25]">
-            <span className="w-2.5 h-2.5 rounded-full bg-[#10b981] animate-pulse-glow shadow-[0_0_8px_#10b981]" />
+            <span
+              className={`w-2.5 h-2.5 rounded-full ${
+                isAirGapped
+                  ? 'bg-[#10b981] animate-pulse-glow shadow-[0_0_8px_#10b981]'
+                  : 'bg-[#ef4444] animate-pulse shadow-[0_0_8px_#ef4444]'
+              }`}
+            />
             <div className="flex flex-col">
-              <span className="text-[#10b981] font-semibold text-xs tracking-wide">AIR-GAPPED MODE</span>
-              <span className="text-[#6d675e] text-[10px]">No external connectivity</span>
+              <span
+                className={`font-semibold text-xs tracking-wide ${
+                  isAirGapped ? 'text-[#10b981]' : 'text-[#ef4444]'
+                }`}
+              >
+                {isAirGapped ? 'AIR-GAPPED MODE' : 'AIR-GAP ALERT'}
+              </span>
+              <span className="text-[#6d675e] text-[10px]">
+                {isAirGapped ? 'No external connectivity' : 'Unapproved egress detected'}
+              </span>
             </div>
           </div>
 
-          {/* External Requests */}
+          {/* Blocked Attempts */}
           <div className="flex flex-col px-4 border-r border-[#2e2a25]">
-            <span className="text-[#6d675e] text-[10px]">External Requests</span>
-            <span className="text-[#f5f2ed] font-mono font-bold text-xs">0</span>
+            <span className="text-[#6d675e] text-[10px]">Blocked Attempts</span>
+            <span className="text-[#f5f2ed] font-mono font-bold text-xs">
+              {metrics.blocked_attempts_count ?? 0}
+            </span>
           </div>
 
-          {/* Data Egress */}
+          {/* Approved Local Requests */}
           <div className="flex flex-col px-4 border-r border-[#2e2a25]">
-            <span className="text-[#6d675e] text-[10px]">Data Egress</span>
-            <span className="text-[#f5f2ed] font-mono font-bold text-xs">0 B</span>
+            <span className="text-[#6d675e] text-[10px]">Local Approved</span>
+            <span className="text-[#f5f2ed] font-mono font-bold text-xs">
+              {metrics.approved_connections_count ?? 0}
+            </span>
           </div>
 
           {/* Live Timestamp */}
