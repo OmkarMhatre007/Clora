@@ -445,3 +445,77 @@ export function downloadCloraProofFile(proofPackage) {
   document.body.removeChild(a);
   window.URL.revokeObjectURL(url);
 }
+
+// ============================================================================
+// Multimodal Vision & Physical Inspection API
+// ============================================================================
+
+export async function getVisionFixtures() {
+  const res = await fetch(`${API_BASE}/api/vision/fixtures`);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return await res.json();
+}
+
+export async function ingestVisionFixture(fixtureId) {
+  const res = await fetch(`${API_BASE}/api/vision/fixtures/${fixtureId}/ingest`, {
+    method: 'POST',
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return await res.json();
+}
+
+export async function uploadVisionPhotograph(file, equipmentTag = null, workspaceId = 'ws-sovereign-01') {
+  const formData = new FormData();
+  formData.append('file', file);
+  if (equipmentTag) formData.append('equipment_tag', equipmentTag);
+  if (workspaceId) formData.append('workspace_id', workspaceId);
+
+  const res = await fetch(`${API_BASE}/api/vision/upload`, {
+    method: 'POST',
+    body: formData,
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: `HTTP ${res.status}` }));
+    throw new Error(err.detail || `Upload failed: ${res.status}`);
+  }
+  return await res.json();
+}
+
+export async function inspectPhotograph(payload) {
+  const res = await fetch(`${API_BASE}/api/vision/inspect`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: `HTTP ${res.status}` }));
+    throw new Error(err.detail || `Inspection failed: ${res.status}`);
+  }
+  return await res.json();
+}
+
+export async function submitHitlReview(inspectionId, decision, notes = '', operatorId = 'operator_admin') {
+  const res = await fetch(`${API_BASE}/api/vision/hitl/review`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      inspection_id: inspectionId,
+      decision,
+      notes,
+      operator_id: operatorId,
+    }),
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return await res.json();
+}
+
+export async function getVisionBenchmark() {
+  const res = await fetch(`${API_BASE}/api/vision/benchmark`);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return await res.json();
+}
+
+export function getArtifactImageUrl(artifactId) {
+  return `${API_BASE}/api/vision/artifacts/${artifactId}`;
+}
+
