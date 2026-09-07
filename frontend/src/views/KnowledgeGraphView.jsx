@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   Network,
   FileText,
@@ -10,198 +10,354 @@ import {
   AlertTriangle,
   CheckCircle2,
   Activity,
-  Layers
+  Layers,
+  Wrench,
+  Package,
+  Clock,
+  Zap
 } from 'lucide-react';
+import {
+  getKnowledgeGraphCytoscape,
+  getBlastRadius,
+  getSovereigntyAuditTrail
+} from '../services/api';
 
 export default function KnowledgeGraphView() {
-  const [selectedNode, setSelectedNode] = useState('P-101');
+  const [graphData, setGraphData] = useState({ nodes: [], edges: [] });
+  const [selectedNodeId, setSelectedNodeId] = useState('P-102A');
+  const [blastRadiusResult, setBlastRadiusResult] = useState(null);
+  const [auditEvents, setAuditEvents] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [calculatingBlast, setCalculatingBlast] = useState(false);
+  const [zoomLevel, setZoomLevel] = useState(1);
 
-  const nodes = [
-    { id: 'P-101', name: 'Pump P-101', type: 'Charge Pump', status: 'CRITICAL', temp: '104.2°C', vibration: '9.82 mm/s', x: 120, y: 150, radius: 40 },
-    { id: 'HEX-301', name: 'Heat Exchanger HEX-301', type: 'Pre-Heat', status: 'WARNING', temp: '88.5°C', vibration: '3.1 mm/s', x: 260, y: 90, radius: 32 },
-    { id: 'TK-502', name: 'Storage Tank TK-502', type: 'Naphtha Tank', status: 'NORMAL', temp: '32.0°C', vibration: '0.8 mm/s', x: 380, y: 170, radius: 35 },
-    { id: 'CV-104B', name: 'Valve CV-104B', type: 'Return Valve', status: 'THROTTLED', temp: '65.0°C', vibration: '1.2 mm/s', x: 250, y: 250, radius: 28 },
-  ];
+  // Layout node positions dynamically
+  const [layoutNodes, setLayoutNodes] = useState([]);
 
-  const auditEvents = [
-    { id: 'ev1', hash: '0a4b36d31b3b3359672a8235d7a4b5d7333090798e23...', user: 'maintenance_engineer', status: 'VERIFIED VALID', time: '09:42 AM' },
-    { id: 'ev2', hash: 'b24b97838c2058795329d489a96ddbc66a0243a5cd98...', user: 'maintenance_engineer', status: 'VERIFIED VALID', time: '09:42 AM' },
-    { id: 'ev3', hash: '0a4b87881b7a8272833d2c35e99d71d37053bb273348...', user: 'supervisor', status: 'VERIFIED VALID', time: '09:43 AM' },
-    { id: 'ev4', hash: '0a4be7a82b3cd2480163a5895a5b2528dab2a2d6e739...', user: 'operator', status: 'VERIFIED VALID', time: '09:45 AM' },
-  ];
+  useEffect(() => {
+    const loadGraph = async () => {
+      setLoading(true);
+      try {
+        const [cytoscape, auditData] = await Promise.all([
+          getKnowledgeGraphCytoscape(),
+          getSovereigntyAuditTrail(6)
+        ]);
 
-  const activeNodeData = nodes.find(n => n.id === selectedNode) || nodes[0];
+        if (cytoscape && cytoscape.elements) {
+          const rawNodes = cytoscape.elements.nodes || [];
+          const rawEdges = cytoscape.elements.edges || [];
+          setGraphData({ nodes: rawNodes, edges: rawEdges });
+
+          // Compute deterministic visual 2D layout for nodes
+          const total = rawNodes.length || 1;
+          const cols = 4;
+          const positioned = rawNodes.map((n, i) => {
+            const row = Math.floor(i / cols);
+            const col = i % cols;
+            const x = 70 + col * 120 + (row % 2 === 1 ? 30 : 0);
+            const y = 60 + row * 85;
+            return {
+              id: n.data.id,
+              name: n.data.label || n.data.id,
+              type: n.data.type || 'Asset',
+              critical: n.data.id.includes('P-102A') || n.data.id.includes('FM-'),
+              x: x,
+              y: y,
+              radius: n.data.id.includes('P-102A') ? 28 : 22
+            };
+          });
+          setLayoutNodes(positioned);
+        }
+
+        if (auditData && auditData.entries) {
+          setAuditEvents(auditData.entries);
+        }
+      } catch (err) {
+        console.warn('Failed loading knowledge graph:', err);
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    loadGraph();
+  }, []);
+
+  // Fetch live blast-radius when node changes
+  useEffect(() => {
+    if (!selectedNodeId) return;
+
+    const fetchRadius = async () => {
+      setCalculatingBlast(true);
+      try {
+        const res = await getBlastRadius(selectedNodeId, 2);
+        if (res) {
+          setBlastRadiusResult(res);
+        }
+      } catch (err) {
+        console.warn('Failed calculating blast radius:', err);
+      } finally {
+        setCalculatingBlast(false);
+      }
+    };
+
+    fetchRadius();
+  }, [selectedNodeId]);
+
+  const activeNodeData = layoutNodes.find(n => n.id === selectedNodeId) || layoutNodes[0] || { id: selectedNodeId, name: selectedNodeId, type: 'Equipment' };
 
   return (
     <div className="space-y-5">
       {/* Header Info */}
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
         <div>
           <span className="text-[11px] font-mono font-bold tracking-widest text-[#6d675e] uppercase">
-            KNOWLEDGE • TOPOLOGY REASONING
+            KNOWLEDGE • NETWORKX TOPOLOGY REASONING
           </span>
           <h1 className="text-xl font-display font-bold text-[#f5f2ed]">
-            Refinery Asset Topology & Evidence Inspector
+            Refinery Asset Topology & Blast-Radius Engine
           </h1>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
           <span className="status-pill-sage">
             <Activity size={12} />
-            <span>Topology Live</span>
+            <span>NetworkX Graph Active</span>
           </span>
           <span className="status-pill-copper">
-            <span>Blast Radius: Calculated</span>
+            <span>Blast Radius: Live</span>
           </span>
         </div>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
         {/* Left Column: Interactive Topology Canvas */}
-        <div className="lg:col-span-7 clora-card p-5 space-y-3 flex flex-col justify-between">
+        <div className="lg:col-span-7 clora-card p-5 space-y-3 flex flex-col justify-between border border-[#2e2a25]">
           <div className="flex items-center justify-between border-b border-[#2e2a25] pb-2.5">
             <span className="text-xs font-semibold text-[#f5f2ed] uppercase tracking-wide">
-              Refinery Asset Topology & Blast Radius
+              Topology Canvas ({layoutNodes.length} Nodes, {graphData.edges.length} Edges)
             </span>
             <div className="flex items-center gap-1.5 text-[#6d675e]">
-              <button className="p-1 rounded hover:bg-[#26231f] text-[#a09a90]"><ZoomIn size={14} /></button>
-              <button className="p-1 rounded hover:bg-[#26231f] text-[#a09a90]"><ZoomOut size={14} /></button>
-              <button className="p-1 rounded hover:bg-[#26231f] text-[#a09a90]"><Maximize2 size={14} /></button>
+              <button
+                onClick={() => setZoomLevel(prev => Math.min(prev + 0.15, 1.6))}
+                className="p-1 rounded hover:bg-[#26231f] text-[#a09a90]"
+                title="Zoom In"
+              >
+                <ZoomIn size={14} />
+              </button>
+              <button
+                onClick={() => setZoomLevel(prev => Math.max(prev - 0.15, 0.7))}
+                className="p-1 rounded hover:bg-[#26231f] text-[#a09a90]"
+                title="Zoom Out"
+              >
+                <ZoomOut size={14} />
+              </button>
+              <button
+                onClick={() => setZoomLevel(1)}
+                className="p-1 rounded hover:bg-[#26231f] text-[#a09a90]"
+                title="Reset Zoom"
+              >
+                <Maximize2 size={14} />
+              </button>
             </div>
           </div>
 
           {/* SVG Canvas */}
-          <div className="w-full h-[320px] bg-[#141211] rounded-xl border border-[#2c2823] relative flex items-center justify-center overflow-hidden">
-            {/* Blast Radius Glowing Halo */}
-            <div className="absolute top-[80px] left-[50px] w-[140px] h-[140px] rounded-full bg-[#d9825b]/10 border border-[#d9825b]/30 animate-pulse-glow" />
-            <div className="absolute top-[50px] left-[20px] w-[200px] h-[200px] rounded-full border border-dashed border-[#d9825b]/20" />
+          <div className="w-full h-[360px] bg-[#141211] rounded-xl border border-[#2c2823] relative flex items-center justify-center overflow-hidden">
+            {/* Blast Radius Glowing Halo on Selected Node */}
+            {selectedNodeId && (
+              <div className="absolute top-4 left-4 bg-[#1e1c19]/90 border border-[#3d3832] rounded-lg px-2.5 py-1 text-[10px] text-[#f0a380] flex items-center gap-1.5 font-mono z-10">
+                <span className="w-1.5 h-1.5 rounded-full bg-[#d9825b] animate-ping" />
+                <span>Blast-Radius Engine: {selectedNodeId}</span>
+              </div>
+            )}
 
-            <svg className="w-full h-full" viewBox="0 0 460 300">
-              {/* Connection Lines */}
-              <line x1="120" y1="150" x2="260" y2="90" stroke="#4a443d" strokeWidth="2" strokeDasharray="4 4" />
-              <line x1="260" y1="90" x2="380" y2="170" stroke="#4a443d" strokeWidth="2" />
-              <line x1="120" y1="150" x2="250" y2="250" stroke="#d9825b" strokeWidth="2" />
-              <line x1="250" y1="250" x2="380" y2="170" stroke="#4a443d" strokeWidth="2" />
+            <svg
+              className="w-full h-full cursor-grab active:cursor-grabbing transition-transform duration-200"
+              viewBox="0 0 520 340"
+              style={{ transform: `scale(${zoomLevel})` }}
+            >
+              {/* Render Connection Edges */}
+              {graphData.edges.map((edge, idx) => {
+                const sourceNode = layoutNodes.find(n => n.id === edge.data.source);
+                const targetNode = layoutNodes.find(n => n.id === edge.data.target);
+                if (!sourceNode || !targetNode) return null;
 
-              {/* Asset Nodes */}
-              {nodes.map((node) => {
-                const isSelected = selectedNode === node.id;
-                const isCritical = node.status === 'CRITICAL';
+                const isConnectedToSelected = edge.data.source === selectedNodeId || edge.data.target === selectedNodeId;
+
+                return (
+                  <g key={`edge_${idx}`}>
+                    <line
+                      x1={sourceNode.x}
+                      y1={sourceNode.y}
+                      x2={targetNode.x}
+                      y2={targetNode.y}
+                      stroke={isConnectedToSelected ? '#d9825b' : '#3d3730'}
+                      strokeWidth={isConnectedToSelected ? '2' : '1.2'}
+                      strokeDasharray={edge.data.relation === 'STANDBY_FOR' ? '4 4' : 'none'}
+                    />
+                  </g>
+                );
+              })}
+
+              {/* Render Asset Nodes */}
+              {layoutNodes.map((node) => {
+                const isSelected = selectedNodeId === node.id;
+                const isCritical = node.critical || node.id.includes('P-102A');
+                const isStandby = node.id.includes('P-102B') || node.id.includes('P-101B');
+
                 return (
                   <g
                     key={node.id}
-                    onClick={() => setSelectedNode(node.id)}
-                    className="cursor-pointer transition-all hover:scale-105"
+                    onClick={() => setSelectedNodeId(node.id)}
+                    className="cursor-pointer transition-all hover:scale-110"
                   >
                     <circle
                       cx={node.x}
                       cy={node.y}
                       r={node.radius}
-                      fill="#1e1b19"
-                      stroke={isCritical ? '#f43f5e' : isSelected ? '#d9825b' : '#6e8c6e'}
-                      strokeWidth={isSelected ? '3' : '2'}
-                      filter="drop-shadow(0 4px 10px rgba(0,0,0,0.5))"
+                      fill="#1a1715"
+                      stroke={isSelected ? '#d9825b' : isCritical ? '#f43f5e' : isStandby ? '#38bdf8' : '#6e8c6e'}
+                      strokeWidth={isSelected ? '3' : '1.8'}
+                      filter="drop-shadow(0 4px 8px rgba(0,0,0,0.6))"
                     />
                     <circle
                       cx={node.x}
                       cy={node.y}
-                      r={node.radius - 8}
-                      fill={isCritical ? 'rgba(244, 63, 94, 0.15)' : 'rgba(217, 130, 91, 0.1)'}
+                      r={node.radius - 5}
+                      fill={isCritical ? 'rgba(244, 63, 94, 0.12)' : isSelected ? 'rgba(217, 130, 91, 0.15)' : 'rgba(110, 140, 110, 0.08)'}
                     />
                     <text
                       x={node.x}
-                      y={node.y - 2}
+                      y={node.y + 4}
                       textAnchor="middle"
                       fill="#f5f2ed"
-                      fontSize="11"
+                      fontSize="9.5"
+                      fontFamily="monospace"
                       fontWeight="bold"
                     >
                       {node.id}
-                    </text>
-                    <text
-                      x={node.x}
-                      y={node.y + 12}
-                      textAnchor="middle"
-                      fill={isCritical ? '#f87171' : '#a09a90'}
-                      fontSize="9"
-                    >
-                      {node.temp}
                     </text>
                   </g>
                 );
               })}
             </svg>
-
-            {/* Blast Radius Label */}
-            <div className="absolute top-4 left-4 bg-[#1e1c19]/90 border border-[#3d3832] rounded-lg px-2.5 py-1 text-[10px] text-[#f0a380] flex items-center gap-1.5 font-mono">
-              <span className="w-1.5 h-1.5 rounded-full bg-[#d9825b] animate-ping" />
-              <span>Blast-Radius: Unit 2 Isolation Sector Active</span>
-            </div>
           </div>
 
           {/* Selected Node Details Bar */}
           <div className="clora-surface p-3 flex items-center justify-between text-xs">
             <div className="flex items-center gap-3">
-              <span className="font-bold text-[#f5f2ed]">{activeNodeData.name}</span>
+              <span className="font-bold text-[#f5f2ed]">{activeNodeData.name || selectedNodeId}</span>
               <span className="text-[#6d675e]">•</span>
-              <span className="text-[#a09a90]">{activeNodeData.type}</span>
+              <span className="text-[#a09a90]">{activeNodeData.type || 'Refinery Equipment'}</span>
             </div>
-            <div className="flex items-center gap-3 font-mono">
-              <span className="text-[#f87171]">Temp: {activeNodeData.temp}</span>
-              <span className="text-[#fbbf24]">Vib: {activeNodeData.vibration}</span>
+            <div className="flex items-center gap-2">
+              <span className="text-[#d9825b] font-mono text-[11px]">
+                {calculatingBlast ? 'Computing downstream impact...' : 'Downstream Path Mapped'}
+              </span>
             </div>
           </div>
         </div>
 
-        {/* Right Column: Multi-Modal Document Split Viewer & Audit Stream */}
+        {/* Right Column: Live Blast Radius & Mitigation Plan */}
         <div className="lg:col-span-5 space-y-4">
-          {/* Document Verification Box */}
-          <div className="clora-card p-4 space-y-3">
+          {/* Blast Radius Box */}
+          <div className="clora-card p-4.5 space-y-3.5 border border-[#2e2a25]">
             <div className="flex items-center justify-between border-b border-[#2e2a25] pb-2">
               <div className="flex items-center gap-2 text-xs font-semibold text-[#f5f2ed]">
-                <FileText size={14} className="text-[#d9825b]" />
-                <span>Document Evidence Split View</span>
+                <AlertTriangle size={14} className="text-[#d9825b]" />
+                <span>Blast-Radius & Failure Cascade ({selectedNodeId})</span>
               </div>
-              <span className="text-[10px] text-[#6e8c6e] font-mono">Page 42 of 52</span>
-            </div>
-
-            <div className="p-3.5 rounded-xl bg-[#151312] border border-[#2e2a25] space-y-2 text-xs leading-relaxed text-[#c8c2b8]">
-              <div className="text-[10px] text-[#6d675e] font-mono uppercase">
-                Pump_P101_Maintenance_Manual.pdf
-              </div>
-              <p className="text-[#a09a90]">
-                ...operating guidelines for continuous service in crude distillation units.
-              </p>
-              {/* Highlighted Evidence Box */}
-              <div className="p-2 rounded bg-[#fbbf24]/15 border-l-2 border-[#fbbf24] text-[#fef3c7] font-medium">
-                Section 4.3: Bearing Operating Limits: 80°C Max. Prolonged operation above 95°C indicates coolant flow restriction or lubricant starvation, leading to rapid micro-spalling.
-              </div>
-              <p className="text-[#a09a90]">
-                Inspect cooling valve CV-104B and verify differential lube header pressure.
-              </p>
-            </div>
-          </div>
-
-          {/* Tamper-Evident SHA-256 Audit Stream */}
-          <div className="clora-card p-4 space-y-3">
-            <div className="flex items-center justify-between border-b border-[#2e2a25] pb-2">
-              <span className="text-xs font-semibold text-[#f5f2ed] uppercase tracking-wide">
-                Tamper-Evident SHA-256 Audit Stream
+              <span className="status-pill-copper text-[10px]">
+                {blastRadiusResult?.blast_radius?.length || 0} Assets Affected
               </span>
-              <span className="status-pill-sage">CRYPTOGRAPHIC PROOF</span>
             </div>
 
-            <div className="space-y-2 font-mono text-[10px]">
-              {auditEvents.map((ev) => (
-                <div key={ev.id} className="p-2 rounded-lg bg-[#161412] border border-[#2b2723] flex items-center justify-between">
-                  <div className="space-y-0.5 truncate mr-2">
-                    <div className="text-[#a09a90] truncate">{ev.hash}</div>
-                    <div className="text-[#6d675e]">{ev.user} • {ev.time}</div>
+            {/* Affected Nodes List */}
+            <div className="space-y-1.5 max-h-40 overflow-y-auto">
+              {blastRadiusResult?.blast_radius && blastRadiusResult.blast_radius.length > 0 ? (
+                blastRadiusResult.blast_radius.map((br, idx) => (
+                  <div
+                    key={idx}
+                    className="p-2 rounded-lg bg-[#181614] border border-[#2b2723] flex items-center justify-between text-xs font-mono"
+                  >
+                    <div className="space-y-0.5">
+                      <div className="text-[#f5f2ed] font-bold">{br.node_id} ({br.entity_type})</div>
+                      <div className="text-[10px] text-[#6d675e]">{br.name}</div>
+                    </div>
+                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-[#291f19] text-[#d9825b] font-bold">
+                      {br.hops} {br.hops === 1 ? 'hop' : 'hops'}
+                    </span>
                   </div>
-                  <span className="text-[#34d399] font-bold shrink-0">{ev.status}</span>
+                ))
+              ) : (
+                <div className="py-4 text-center text-[#6d675e] text-xs font-mono">
+                  No downstream failure cascade for {selectedNodeId}
                 </div>
-              ))}
+              )}
             </div>
+
+            {/* Standby Asset Available */}
+            {blastRadiusResult?.standby_available && (
+              <div className="p-2.5 rounded-lg bg-[#142319] border border-[#1f5433] flex items-center justify-between text-xs">
+                <div className="space-y-0.5">
+                  <div className="text-[#34d399] font-bold flex items-center gap-1.5">
+                    <CheckCircle2 size={13} />
+                    <span>Auto-Standby: {blastRadiusResult.standby_available.standby_id}</span>
+                  </div>
+                  <div className="text-[10px] text-[#8ca68c]">
+                    {blastRadiusResult.standby_available.name}
+                  </div>
+                </div>
+                <span className="status-pill-emerald text-[9px]">ONLINE READY</span>
+              </div>
+            )}
           </div>
+
+          {/* Mitigation Plan & Parts Stock */}
+          {blastRadiusResult?.mitigation_plan && (
+            <div className="clora-card p-4.5 space-y-3 border border-[#2e2a25]">
+              <div className="flex items-center justify-between border-b border-[#2e2a25] pb-2">
+                <div className="flex items-center gap-2 text-xs font-semibold text-[#f5f2ed]">
+                  <Wrench size={14} className="text-[#38bdf8]" />
+                  <span>SOP Mitigation & Inventory Parts</span>
+                </div>
+                <span className="text-[10px] text-[#38bdf8] font-mono">
+                  Downtime: {blastRadiusResult.mitigation_plan.mitigations?.[0]?.downtime_hours || 18}h
+                </span>
+              </div>
+
+              {/* Mitigation Cost & Procedure */}
+              <div className="grid grid-cols-2 gap-2 text-xs font-mono">
+                <div className="p-2 rounded bg-[#181614] border border-[#2e2a25]">
+                  <div className="text-[9px] text-[#6d675e]">PROCEDURE</div>
+                  <div className="text-[#f5f2ed] font-bold truncate">
+                    {blastRadiusResult.mitigation_plan.mitigations?.[0]?.procedure || 'SOP-CDU-SEC-014'}
+                  </div>
+                </div>
+                <div className="p-2 rounded bg-[#181614] border border-[#2e2a25]">
+                  <div className="text-[9px] text-[#6d675e]">EST. OVERHAUL COST</div>
+                  <div className="text-[#d9825b] font-bold">
+                    ₹{blastRadiusResult.mitigation_plan.mitigations?.[0]?.cost_inr?.toLocaleString() || '285,000'}
+                  </div>
+                </div>
+              </div>
+
+              {/* Parts Stock Availability */}
+              <div className="space-y-1.5 pt-1">
+                <div className="text-[10px] font-mono text-[#6d675e] uppercase">Required Spare Parts:</div>
+                {(blastRadiusResult.mitigation_plan.required_parts || []).map((part, i) => (
+                  <div key={i} className="p-2 rounded bg-[#181614] border border-[#2b2723] flex items-center justify-between text-xs">
+                    <div className="flex items-center gap-2">
+                      <Package size={13} className="text-[#d9825b]" />
+                      <span className="text-[#cbd5e1] font-mono text-[11px]">{part.name}</span>
+                    </div>
+                    <span className="text-[10px] font-mono text-[#10b981] font-bold">
+                      {part.stock_available} in stock
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       </div>
     </div>

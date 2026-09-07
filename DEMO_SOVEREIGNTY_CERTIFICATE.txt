@@ -4,25 +4,25 @@
    Mangalore Refinery and Petrochemicals Limited (MRPL SIH26117)              
 ================================================================================
 
-Timestamp:              2026-09-06T18:18:52.906499+00:00
+Timestamp:              2026-09-07T09:24:11.691497+00:00
 Verification Status:    ALERT / VIOLATION RECORDED
 Active Network Profile: STRICT_AIRGAP
-Audited Checkpoints:    12 snapshot cycles
+Audited Checkpoints:    16 snapshot cycles
 External Sockets Found: 0
 Blocked Egress Attempts:0
 Hash Chain Integrity:   COMPROMISED
-Root Integrity Hash:    f945a546f2b03885c5354e62a9c24c4798529d12ce1185841011a77a78530864
-Audit Log File:         C:\Users\Moiz\Desktop\PROJECTS\Clora\demo_airgap_proof.jsonl
+Root Integrity Hash:    b7247fe3504cb329a05e9039050f939e2c54ecc1b5c957d6957313fe75666f98
+Audit Log File:         C:\Users\deep\OneDrive\Desktop\clora\Clora\demo_airgap_proof.jsonl
 
 OPERATIONAL CONTROL SCOPE:
-Level A (Application Egress Guard):
-  - All outbound network calls from the CLORA Python process are evaluated against
+Layer 1 (OS Enforcement Boundary):
+  - Named firewall rule CLORA_DENY_OUTBOUND blocks all outbound host traffic.
+Level A (Application Egress Guard) / Layer 2 Instrumentation:
+  - All outbound network calls and DNS resolutions from the CLORA Python process are evaluated against
     the active Network Trust Profile prior to socket connection handshakes.
   - Disallowed destinations are synchronously blocked with AirGapViolationError.
   - Zero external cloud inference APIs were contacted during document extraction,
     vector indexing, local model execution, and report generation.
-
-Level B (Host/Deployment Guidance):
-  - Designed to operate securely within refinery-managed OT/SCADA air-gapped VLANs
-    and isolated host network policies.
+Layer 3 (Cryptographic Evidence):
+  - Tamper-evident SHA-256 hash chain and Ed25519 digital signatures.
 ================================================================================
