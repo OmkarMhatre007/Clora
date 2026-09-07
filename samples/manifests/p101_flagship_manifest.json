@@ -1,0 +1,38 @@
+{
+  "scenario_id": "P101_FLAGSHIP_END_TO_END",
+  "equipment_id": "P-101",
+  "equipment_name": "Sulzer API 610 BB2 Centrifugal Feed Pump",
+  "plant_unit": "MRPL Sulfur Recovery Unit (SRU-2)",
+  "version": "1.0",
+  "flagship_photo": {
+    "filename": "p101_bearing.jpg",
+    "sha256": "c995c63f678792a2a16c01534ddcc5218ec163dd45e5273b7e50051898685493",
+    "path": "samples\\photographs\\p101_bearing.jpg",
+    "defect_observed": "BEARING_FATIGUE_SPALLING"
+  },
+  "flagship_nameplate": {
+    "filename": "nameplate.jpg",
+    "sha256": "589241a261448a206f4be882d1c05d130689bfbe0afcb4f05f298613ec2667da",
+    "path": "samples\\photographs\\nameplate.jpg",
+    "design_limits": {
+      "rated_power_kw": 315.0,
+      "rated_speed_rpm": 1480,
+      "max_pressure_bar": 25.0
+    }
+  },
+  "telemetry_dataset": {
+    "filename": "p101_vibration_telemetry.csv",
+    "sha256": "058108cd5d95d3f24f8d9dc3604032eccd782cd4204da31360b2db13a24eefc8",
+    "path": "samples\\telemetry\\p101_vibration_telemetry.csv",
+    "peak_vibration_rms": 9.82,
+    "peak_bearing_temp_c": 104.2,
+    "iso_limit_exceeded": true
+  },
+  "sop_document": {
+    "filename": "SOP-MRPL-P101-MNT.md",
+    "sha256": "281b6cc074f511a832c69e0d9f284fd781c13a154aa46570912540d78c0ef10f",
+    "path": "samples\\sop\\SOP-MRPL-P101-MNT.md",
+    "governing_standard": "ISO 10816-3 (Class II/III)",
+    "intervention_section": "Section 4.2 Mechanical Overhaul & Bearing Replacement"
+  }
+}

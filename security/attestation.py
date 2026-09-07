@@ -235,6 +235,73 @@ class EvidenceAttestor:
             logger.error("Best-effort workflow chain attestation signing failed: %s", e)
             return None
 
+    def sign_photograph_inspection(
+        self,
+        inspection_result: Any,
+        evidence_ids: Optional[List[str]] = None,
+        extra_metadata: Optional[Dict[str, Any]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Cryptographically signs a PhotographInspectionResult with the local Ed25519 key.
+        Binds artifact hash, inspection ID, provenance, evidence IDs, inspection status, and assessment.
+        """
+        try:
+            timestamp = datetime.now(timezone.utc).isoformat()
+
+            if hasattr(inspection_result, "model_dump"):
+                data = inspection_result.model_dump()
+            elif isinstance(inspection_result, dict):
+                data = inspection_result
+            else:
+                data = {"raw": str(inspection_result)}
+
+            prov = data.get("provenance", {})
+            canonical_payload: Dict[str, Any] = {
+                "system": "CLORA Sovereign Industrial AI Workbench",
+                "organization": "Mangalore Refinery and Petrochemicals Limited (MRPL SIH26117)",
+                "generated_at": timestamp,
+                "inspection_id": data.get("inspection_id"),
+                "artifact_id": prov.get("artifact_id") if isinstance(prov, dict) else getattr(prov, "artifact_id", "img_01"),
+                "content_hash": prov.get("content_hash") if isinstance(prov, dict) else getattr(prov, "content_hash", ""),
+                "equipment_tag": data.get("equipment_tag"),
+                "defect_class": str(data.get("defect_class")),
+                "severity": str(data.get("severity")),
+                "inspection_status": str(data.get("inspection_status")),
+                "evidence_status": str(data.get("evidence_status")),
+                "evidence_ids": evidence_ids or [f"ev_vis_{data.get('inspection_id')}"],
+                "recommendation": data.get("evidence_bound_recommendation"),
+            }
+            if extra_metadata:
+                canonical_payload["metadata"] = extra_metadata
+
+            canonical_bytes = canonicalize_payload(canonical_payload)
+            payload_sha256 = hashlib.sha256(canonical_bytes).hexdigest()
+
+            priv_key = self.key_manager.get_private_key()
+            raw_signature = priv_key.sign(canonical_bytes)
+            signature_b64 = base64.b64encode(raw_signature).decode("utf-8")
+
+            key_id = self.key_manager.get_key_id()
+            public_key_pem = self.key_manager.get_public_key_pem()
+
+            return {
+                "sealed": True,
+                "schema_version": "1.0",
+                "proof_id": f"PROOF-INSP-{data.get('inspection_id', '0')}-{key_id}",
+                "key_id": key_id,
+                "signer": "CLORA Sovereign Local Instance",
+                "algorithm": "Ed25519",
+                "generated_at": timestamp,
+                "content_sha256": payload_sha256,
+                "canonical_payload": canonical_payload,
+                "signature": signature_b64,
+                "public_key_pem": public_key_pem,
+            }
+        except Exception as e:
+            logger.error("Visual inspection attestation signing failed: %s", e)
+            return None
+
+
     def export_clora_proof(self, proof_package: Dict[str, Any], output_path: str) -> str:
         """Writes the signed evidence package to disk as a .clora-proof file."""
         abs_path = os.path.abspath(output_path)
@@ -317,7 +384,19 @@ class EvidenceVerifier:
         except Exception as e:
             return False, f"INVALID — Cryptographic verification error: {str(e)}", {}
 
+    @classmethod
+    def verify_proof_package(cls, proof_package: Dict[str, Any]) -> Dict[str, Any]:
+        """Convenience dictionary-based verifier interface."""
+        is_valid, msg, details = cls.verify_proof(proof_package)
+        return {
+            "verified": is_valid,
+            "message": msg,
+            "details": details,
+            "error": None if is_valid else msg,
+        }
+
     @staticmethod
+
     def simulate_tampering(
         proof_package: Dict[str, Any],
         modified_text: str = "Equipment temperature exceeded 199.9°C (CRITICAL EXCURSION)",

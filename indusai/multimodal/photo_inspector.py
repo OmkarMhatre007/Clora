@@ -4,7 +4,7 @@ INDUSAI-X / CLORA Sovereign Multimodal Intelligence Subsystem.
 
 Enforces:
 1. Model-independent RawInspectionProposal from providers.
-2. SHA-256 Hash-Fixture Registry for the CalibratedTestProvider (no manufactured answers).
+2. SHA-256 Hash-Fixture Registry for CalibratedTestProvider (no manufactured answers).
 3. Deterministic Pre-Classifier for Drawing vs. Photo discrimination.
 4. Domain Validation & Engineering Policy Gate (decoupled from VLM perception).
 5. Immutable 11-factor execution provenance binding.
@@ -17,7 +17,7 @@ import base64
 import hashlib
 import logging
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional, Tuple, Literal
+from typing import Any, Dict, List, Optional, Tuple, Literal, Union
 from PIL import Image
 
 from indusai.multimodal.photo_schema import (
@@ -40,6 +40,20 @@ from indusai.multimodal.photo_schema import (
     VisualFinding,
     RootCauseHypothesis,
     PhotographInspectionResult,
+)
+from indusai.multimodal.validators import (
+    BoundingBoxValidator,
+    SchemaValidator,
+    DomainValidator,
+)
+from indusai.multimodal.engineering_policy import (
+    EngineeringPolicyGate,
+    EngineeringPolicyProfile,
+    P101_BEARING_PROFILE,
+    MOTOR_PROFILE,
+    PUMP_PROFILE,
+    FLANGE_PROFILE,
+    POLICY_REGISTRY,
 )
 
 logger = logging.getLogger("indusai.multimodal.photo_inspector")
@@ -71,6 +85,29 @@ class CalibratedTestProvider(BasePhotoProvider):
 
     def __init__(self, registered_fixtures: Optional[Dict[str, str]] = None):
         self.registry = dict(registered_fixtures or self.FIXTURE_REGISTRY)
+        self._load_manifest_fixtures()
+
+    def _load_manifest_fixtures(self) -> None:
+        """Loads golden vision fixtures from manifest.json if present."""
+        possible_paths = [
+            os.path.join("samples", "vision_fixtures", "manifest.json"),
+            os.path.join(os.path.dirname(__file__), "..", "..", "samples", "vision_fixtures", "manifest.json"),
+        ]
+        for p in possible_paths:
+            if os.path.exists(p):
+                try:
+                    with open(p, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                        if isinstance(data, list):
+                            for entry in data:
+                                h = entry.get("sha256")
+                                fid = entry.get("fixture_id")
+                                if h and fid:
+                                    self.registry[h] = fid
+                    logger.info("CalibratedTestProvider loaded %d fixtures from %s", len(self.registry), p)
+                    break
+                except Exception as e:
+                    logger.warning("Failed loading fixtures from %s: %s", p, e)
 
     def register_fixture(self, sha256_hash: str, scenario_key: str) -> None:
         """Registers a known image hash to a calibrated scenario key."""
@@ -82,17 +119,22 @@ class CalibratedTestProvider(BasePhotoProvider):
         metadata: Dict[str, Any],
         query: Optional[str] = None
     ) -> RawInspectionProposal:
-        # Compute SHA-256 of raw image bytes
-        buf = io.BytesIO()
-        image.save(buf, format="PNG")
-        img_bytes = buf.getvalue()
-        img_hash = hashlib.sha256(img_bytes).hexdigest()
+        # Check explicit content hash passed from artifact manager or metadata first
+        img_hash = metadata.get("content_hash")
+        if not img_hash:
+            buf = io.BytesIO()
+            image.save(buf, format="PNG")
+            img_bytes = buf.getvalue()
+            img_hash = hashlib.sha256(img_bytes).hexdigest()
 
         scenario = self.registry.get(img_hash)
-        q_lower = (query or "").lower()
 
-        # If hash is not registered, also check explicit fixture metadata tag
-        if not scenario and metadata.get("fixture_scenario"):
+        # Only allow fixture_scenario override if running under explicit test mode
+        is_test_mode = (
+            metadata.get("execution_mode") == "test"
+            or metadata.get("mode") == "test"
+        )
+        if not scenario and is_test_mode and metadata.get("fixture_scenario"):
             scenario = metadata["fixture_scenario"]
 
         if not scenario:
@@ -266,17 +308,19 @@ class CalibratedTestProvider(BasePhotoProvider):
 
 class OllamaPhotoProvider(BasePhotoProvider):
     """
-    Local-first sovereign VLM provider using local Ollama daemon (Qwen2-VL or Llama-3.2-Vision).
+    Local-first sovereign VLM provider using local Ollama daemon (Qwen2-VL, Qwen2.5, or Llama-3.2-Vision).
     Zero internet access required. Requests strictly observations and raw text.
+    Resilient to markdown fences, malformed JSON, NaN/Inf, and missing keys.
     """
 
     def __init__(
         self,
         base_url: str = "http://127.0.0.1:11434",
-        model_name: str = "qwen2.5:3b"
+        model_name: Optional[str] = None
     ):
         self.base_url = base_url.rstrip("/")
-        self.model_name = model_name
+        env_model = os.environ.get("CLORA_VISION_MODEL")
+        self.model_name = model_name or env_model or "qwen3.5:latest"
         self._is_available: Optional[bool] = None
 
     def check_alive(self) -> bool:
@@ -284,9 +328,21 @@ class OllamaPhotoProvider(BasePhotoProvider):
             return self._is_available
         try:
             import httpx
-            with httpx.Client(timeout=0.4) as client:
+            with httpx.Client(timeout=0.8) as client:
                 resp = client.get(f"{self.base_url}/api/tags")
-                self._is_available = (resp.status_code == 200)
+                if resp.status_code == 200:
+                    tags = resp.json().get("models", [])
+                    available_names = [m.get("name") for m in tags if isinstance(m, dict)]
+                    # If specified model is not installed but other models exist, adapt
+                    if self.model_name not in available_names and available_names:
+                        vision_candidates = [n for n in available_names if "vision" in n.lower() or "qwen" in n.lower()]
+                        if vision_candidates:
+                            self.model_name = vision_candidates[0]
+                        else:
+                            self.model_name = available_names[0]
+                    self._is_available = True
+                else:
+                    self._is_available = False
         except Exception:
             self._is_available = False
         return self._is_available
@@ -301,6 +357,7 @@ class OllamaPhotoProvider(BasePhotoProvider):
             raise RuntimeError(f"Local Ollama VLM daemon at {self.base_url} is unreachable.")
 
         import httpx
+        import re
 
         buffer = io.BytesIO()
         image.save(buffer, format="PNG")
@@ -312,7 +369,7 @@ class OllamaPhotoProvider(BasePhotoProvider):
             "{\n"
             "  \"category\": \"DEFECT_INSPECTION\" | \"NAMEPLATE_OCR\" | \"EQUIPMENT_SURVEY\",\n"
             "  \"equipment_tag\": string or null,\n"
-            "  \"defect_class\": \"BEARING_FATIGUE_SPALLING\" | \"PITTING_CORROSION\" | \"FLANGE_LEAKAGE\" | \"CLEAN_NORMAL\" | \"UNKNOWN\",\n"
+            "  \"defect_class\": \"BEARING_FATIGUE_SPALLING\" | \"PITTING_CORROSION\" | \"FLANGE_LEAKAGE\" | \"THERMAL_DISCOLORATION\" | \"CLEAN_NORMAL\" | \"UNKNOWN\",\n"
             "  \"observations\": [string],\n"
             "  \"hypothesis\": string or null,\n"
             "  \"nameplate\": {\n"
@@ -322,53 +379,60 @@ class OllamaPhotoProvider(BasePhotoProvider):
             "}"
         )
 
-        with httpx.Client(timeout=10.0) as client:
-            resp = client.post(
-                f"{self.base_url}/api/generate",
-                json={
-                    "model": self.model_name,
-                    "prompt": prompt,
-                    "images": [b64_img],
-                    "stream": False
-                }
-            )
-            if resp.status_code != 200:
-                raise RuntimeError(f"Ollama returned HTTP {resp.status_code}: {resp.text}")
+        try:
+            with httpx.Client(timeout=15.0) as client:
+                resp = client.post(
+                    f"{self.base_url}/api/generate",
+                    json={
+                        "model": self.model_name,
+                        "prompt": prompt,
+                        "images": [b64_img],
+                        "stream": False
+                    }
+                )
+                if resp.status_code != 200:
+                    raise RuntimeError(f"Ollama returned HTTP {resp.status_code}: {resp.text}")
 
-            out_text = resp.json().get("response", "").strip()
-            # Clean possible markdown fence
-            if out_text.startswith("```"):
-                out_text = out_text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+                out_text = resp.json().get("response", "").strip()
 
-            parsed = json.loads(out_text)
+                # Clean possible markdown fence
+                if "```" in out_text:
+                    match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", out_text)
+                    if match:
+                        out_text = match.group(1).strip()
+                    else:
+                        out_text = out_text.replace("```json", "").replace("```", "").strip()
 
-            regions = []
-            if parsed.get("bbox") and len(parsed["bbox"]) == 4:
-                b = parsed["bbox"]
-                if 0 <= b[1] < b[3] <= 1 and 0 <= b[0] < b[2] <= 1:
-                    regions.append(NormalizedRegion(ymin=b[0], xmin=b[1], ymax=b[2], xmax=b[3], label="VLM Detection"))
+                try:
+                    parsed = json.loads(out_text)
+                except Exception:
+                    brace_match = re.search(r"\{[\s\S]*\}", out_text)
+                    if brace_match:
+                        parsed = json.loads(brace_match.group(0))
+                    else:
+                        raise ValueError(f"Unparseable response text: {out_text[:120]}")
 
-            cat_str = parsed.get("category", "DEFECT_INSPECTION").upper()
-            cat = PhotoCategory.NAMEPLATE_OCR if "NAMEPLATE" in cat_str else PhotoCategory.DEFECT_INSPECTION
+                # Use SchemaValidator to validate and construct RawInspectionProposal
+                return SchemaValidator.sanitize_raw_proposal(
+                    raw_dict=parsed,
+                    provider_id=f"ollama_{self.model_name}",
+                    default_equipment_tag=metadata.get("equipment_tag")
+                )
 
-            defect_str = parsed.get("defect_class", "UNKNOWN").upper()
-            defect_class = DefectClass.__members__.get(defect_str, DefectClass.UNKNOWN)
-
+        except Exception as exc:
+            logger.warning("Ollama provider error (%s). Emitting inconclusive proposal.", exc)
             return RawInspectionProposal(
                 provider_id=f"ollama_{self.model_name}",
-                proposed_category=cat,
-                equipment_tag_candidate=parsed.get("equipment_tag"),
-                observed_defect_class=defect_class,
-                observed_regions=regions,
-                raw_findings=parsed.get("observations", []),
-                proposed_hypothesis=parsed.get("hypothesis"),
-                hypothesis_confidence=0.70,
-                nameplate_proposal=parsed.get("nameplate"),
-                raw_model_response=parsed,
+                proposed_category=PhotoCategory.UNKNOWN,
+                equipment_tag_candidate=metadata.get("equipment_tag", "UNKNOWN"),
+                observed_defect_class=DefectClass.UNKNOWN,
+                observed_regions=[],
+                raw_findings=[f"VLM inspection inconclusive: {exc}"],
+                proposed_hypothesis=None,
                 confidence_vector=VisualConfidenceVector(
-                    visual_confidence=0.82,
-                    classification_confidence=0.78,
-                    image_quality_score=0.90
+                    visual_confidence=0.1,
+                    classification_confidence=0.1,
+                    image_quality_score=0.5,
                 )
             )
 
@@ -397,13 +461,11 @@ class DeterministicPreClassifier:
             return "PHYSICAL_PHOTOGRAPH"
 
         # 2. Image heuristic inspection (Vector/drawing vs Natural photo)
-        # Engineering drawings are almost always high aspect (wide) and largely monochromatic / high white background.
         w, h = image.size
         aspect = w / max(1, h)
 
         # Sample colors if RGB
         if image.mode in ("RGB", "RGBA"):
-            # Check white pixel ratio (drawings typically > 75% white/near-white)
             small = image.resize((64, 64)).convert("L")
             pixels = list(small.tobytes())
             near_white_count = sum(1 for p in pixels if p > 240)
@@ -412,71 +474,6 @@ class DeterministicPreClassifier:
                 return "DRAWING_SCHEMATIC"
 
         return "PHYSICAL_PHOTOGRAPH"
-
-
-class EngineeringPolicyGate:
-    """
-    Deterministic Engineering Policy Gate.
-    CLORA never permits a VLM to unilaterally assert 'CRITICAL_FAILURE'.
-    This gate evaluates visual observations against quantitative operating parameters
-    (vibration RMS, bearing temperature) and applicable industrial standards (ISO 10816-3).
-    """
-
-    @staticmethod
-    def evaluate(
-        proposal: RawInspectionProposal,
-        telemetry_context: Optional[Dict[str, Any]] = None,
-        sop_context: Optional[str] = None
-    ) -> Tuple[SeverityLevel, bool, bool, Optional[str]]:
-        """
-        Returns: (severity, requires_immediate_action, requires_human_review, evidence_bound_recommendation)
-        """
-        t = telemetry_context or {}
-        vib_rms = t.get("vibration_rms", t.get("vibration_velocity_rms"))
-        temp_c = t.get("bearing_temp_c", t.get("temperature_c"))
-
-        defect = proposal.observed_defect_class
-
-        # Scenario 1: Severe Spalling + Verified Vibration/Temperature Excursion
-        if defect == DefectClass.BEARING_FATIGUE_SPALLING:
-            # Check if telemetry corroborates (ISO 10816-3 Class II/III trip limit typically ~7.1 to 9.0 mm/s)
-            has_vib_trip = vib_rms is not None and float(vib_rms) >= 7.1
-            has_temp_trip = temp_c is not None and float(temp_c) >= 80.0
-
-            if has_vib_trip or has_temp_trip:
-                rec = (
-                    "Initiate controlled operational shutdown of Pump P-101. "
-                    "Execute mechanical decoupling, inspect lube oil filter for metallic debris, "
-                    "and replace inboard bearing assembly per SOP-MRPL-P101-MNT Section 4.2."
-                )
-                return SeverityLevel.CRITICAL, True, True, rec
-            else:
-                rec = "Schedule bearing raceway replacement at next planned turnaround. Continue vibration monitoring."
-                return SeverityLevel.HIGH, False, True, rec
-
-        # Scenario 2: Flange Pitting Corrosion
-        elif defect == DefectClass.PITTING_CORROSION:
-            rec = (
-                "Perform ultrasonic thickness (UT) wall measurement across flange neck to determine minimum remaining wall thickness. "
-                "Do not pressurize above 15 bar until verified per ASME B31.3 corrosion allowance limits."
-            )
-            return SeverityLevel.MODERATE, False, True, rec
-
-        # Scenario 3: Thermal Discoloration on Motor Winding
-        elif defect == DefectClass.THERMAL_DISCOLORATION:
-            rec = (
-                "Conduct Megger insulation resistance test and polarization index (PI) evaluation before re-energizing. "
-                "Inspect forced ventilation cowling for flow blockage."
-            )
-            return SeverityLevel.HIGH, True, True, rec
-
-        # Scenario 4: Nameplate OCR or Normal Clean Inspection
-        elif proposal.proposed_category == PhotoCategory.NAMEPLATE_OCR or defect == DefectClass.CLEAN_NORMAL:
-            rec = "Nameplate design parameters verified against asset master register. No immediate mechanical intervention required."
-            return SeverityLevel.NORMAL, False, False, rec
-
-        # Default fallback
-        return SeverityLevel.UNKNOWN, False, True, "Insufficient visual evidence to mandate action. Recommend visual re-inspection."
 
 
 class PhotographInspectionEngine:
@@ -533,44 +530,59 @@ class PhotographInspectionEngine:
         inspection_id = f"INSP-{content_hash[:8].upper()}"
 
         # 2. Compute 11-Factor Immutable Provenance
-        # Preprocessing hash: SHA-256 of normalized RGB bytes
         norm_img = image.convert("RGB")
         p_buf = io.BytesIO()
         norm_img.save(p_buf, format="PNG")
         prep_hash = hashlib.sha256(p_buf.getvalue()).hexdigest()
 
-        # 3. Provider Selection (Production vs. Test Infrastructure)
-        use_test = (
+        # 3. Cryptographic Deterministic Provider Selection (Phase 2)
+        # Check if hash is in fixture registry
+        is_known_fixture = (content_hash in self.test_provider.registry)
+        is_test_mode = (
             self.force_mode == "test"
             or meta.get("mode") == "test"
-            or content_hash in self.test_provider.registry
-            or meta.get("fixture_scenario") is not None
+            or meta.get("execution_mode") == "test"
         )
 
-        provider = self.test_provider if use_test else self.production_provider
+        # Include content_hash in metadata passed to provider
+        merged_meta = dict(meta)
+        merged_meta["content_hash"] = content_hash
+
+        if is_test_mode or is_known_fixture:
+            provider = self.test_provider
+        else:
+            # Unknown image under production -> Local Ollama VLM
+            provider = self.production_provider
 
         try:
-            raw_proposal = provider.propose_inspection(norm_img, meta, query=query)
+            raw_proposal = provider.propose_inspection(norm_img, merged_meta, query=query)
         except Exception as prov_err:
-            logger.warning("Production VLM provider failed (%s), falling back to test provider", prov_err)
-            raw_proposal = self.test_provider.propose_inspection(norm_img, meta, query=query)
+            logger.warning("Provider failed (%s)", prov_err)
+            if is_test_mode:
+                raw_proposal = self.test_provider.propose_inspection(norm_img, merged_meta, query=query)
+            else:
+                # In production: Never fabricate when real VLM is unavailable. Emit INCONCLUSIVE proposal.
+                raw_proposal = RawInspectionProposal(
+                    provider_id="inconclusive_fallback",
+                    proposed_category=PhotoCategory.UNKNOWN,
+                    equipment_tag_candidate=meta.get("equipment_tag", "UNKNOWN"),
+                    observed_defect_class=DefectClass.UNKNOWN,
+                    observed_regions=[],
+                    raw_findings=[f"Inspection inconclusive: Sovereign local VLM offline or encountered error ({prov_err})."],
+                    confidence_vector=VisualConfidenceVector(
+                        visual_confidence=0.0,
+                        classification_confidence=0.0,
+                        image_quality_score=0.5,
+                    )
+                )
 
-        # 4. Schema & BoundingBox Validation
-        valid_regions = []
-        for r in raw_proposal.observed_regions:
-            try:
-                # Region model validator already enforces 0 <= xmin < xmax <= 1 and 0 <= ymin < ymax <= 1
-                valid_regions.append(r)
-            except Exception as bbox_err:
-                logger.warning("Discarding invalid bounding region: %s", bbox_err)
+        # 4. Schema & BoundingBox Validation (Phase 4)
+        valid_regions = BoundingBoxValidator.filter_and_build_regions(raw_proposal.observed_regions)
 
-        # 5. Deterministic Domain Validation
-        eq_identified = bool(raw_proposal.equipment_tag_candidate and raw_proposal.equipment_tag_candidate != "UNKNOWN")
-        measurement_valid = True
-        unit_valid = True
-        range_valid = True
-        domain_details = []
+        # 5. Deterministic Domain Validation (Phase 5)
+        domain_val = DomainValidator.validate_proposal(raw_proposal)
 
+        # Nameplate reconstruction if present
         nameplate_obj = None
         if raw_proposal.nameplate_proposal:
             np = raw_proposal.nameplate_proposal
@@ -603,37 +615,20 @@ class PhotographInspectionEngine:
                 voltage_v=parsed_fields.get("voltage_v"),
                 raw_fields=parsed_fields
             )
-            # Domain check: Power should be within 1 to 5000 kW for typical plant pumps
-            if nameplate_obj.rated_power_kw and nameplate_obj.rated_power_kw.value:
-                val = float(nameplate_obj.rated_power_kw.value)
-                if not (1.0 <= val <= 5000.0):
-                    range_valid = False
-                    domain_details.append(f"Rated power {val} kW out of physical industrial range [1, 5000]")
 
-        dom_status = "VALID" if (measurement_valid and range_valid and unit_valid) else "PARTIAL"
-        domain_val = DomainValidation(
-            equipment_identified=eq_identified,
-            measurement_valid=measurement_valid,
-            unit_valid=unit_valid,
-            range_valid=range_valid,
-            source_consistent=True,
-            status=dom_status,
-            details=domain_details
-        )
-
-        # 6. Engineering Policy Gate
+        # 6. Engineering Policy Gate (Phase 6)
         severity, req_imm, req_review, rec = self.policy_gate.evaluate(
             proposal=raw_proposal,
             telemetry_context=telemetry_context,
         )
 
-        # 7. Uncertainty & Evidence Trust Gating
+        # 7. Uncertainty & Evidence Trust Gating (Phase 7)
         conf = raw_proposal.confidence_vector
-        if conf.image_quality_score < 0.40 or conf.classification_confidence < 0.40:
+        if conf.image_quality_score < 0.40 or conf.classification_confidence < 0.40 or raw_proposal.proposed_category == PhotoCategory.UNKNOWN:
             insp_status = InspectionStatus.INCONCLUSIVE
             ev_status = EvidenceStatus.UNVERIFIED
             req_review = True
-        elif conf.classification_confidence >= 0.80 and dom_status == "VALID":
+        elif conf.classification_confidence >= 0.80 and domain_val.status == "VALID":
             insp_status = InspectionStatus.VERIFIED
             ev_status = EvidenceStatus.CORROBORATED if telemetry_context else EvidenceStatus.VERIFIED
         else:

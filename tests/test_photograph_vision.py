@@ -395,7 +395,235 @@ def test_langgraph_workflow_with_visual_evidence():
     assert "critical" in draft.lower()
     assert "immediate action required: true" in draft.lower()
 
+    # Verify dedicated state references (Phase 10)
+    assert final_state.get("vision_inspection_id") is not None
+    assert len(final_state.get("vision_evidence_ids", [])) >= 1
+    assert "cross_correlation" in final_state
+    assert final_state["cross_correlation"]["corroboration"] == "STRONG"
+    assert "visual_attestation" in final_state
+    assert final_state["visual_attestation"]["signature"] is not None
+
     # Verify cryptographic air-gap sentinel recorded inspection
     audit_events = [e.get("event") for e in final_state.get("audit_log", [])]
     assert "visual_inspection_executed" in audit_events
     assert len(final_state.get("airgap_proof_hashes", [])) >= 3
+
+
+# ==============================================================================
+# 9. Phase 16 Adversarial & Security Test Suite
+# ==============================================================================
+
+def test_golden_fixtures_corrosion_and_motor_stator():
+    """Verify calibrated test provider handles all golden fixture scenarios."""
+    engine = PhotographInspectionEngine(force_mode="test")
+
+    # Flange corrosion
+    res_corrosion = engine.inspect_photograph(
+        image_input="samples/vision_fixtures/flange_corrosion.jpg",
+        artifact_id="art_flange_01",
+        metadata={"fixture_scenario": "FLANGE_PITTING_CORROSION"}
+    )
+    assert res_corrosion.defect_class == DefectClass.PITTING_CORROSION
+    assert res_corrosion.severity == SeverityLevel.MODERATE
+    assert "ultrasonic thickness" in res_corrosion.evidence_bound_recommendation.lower()
+
+    # Motor stator scorch
+    res_motor = engine.inspect_photograph(
+        image_input="samples/vision_fixtures/motor_stator.jpg",
+        artifact_id="art_motor_01",
+        metadata={"fixture_scenario": "MOTOR_STATOR_SCORCH"}
+    )
+    assert res_motor.defect_class == DefectClass.THERMAL_DISCOLORATION
+    assert res_motor.severity == SeverityLevel.HIGH
+    assert "megger" in res_motor.evidence_bound_recommendation.lower()
+
+
+def test_artifact_manager_magic_bytes_and_security(tmp_path):
+    """Verify ArtifactManager magic byte checks, size limits, and SHA-256 fingerprinting."""
+    from backend.app.services.artifact_manager import ArtifactManager
+
+    mgr = ArtifactManager(base_storage_dir=str(tmp_path))
+
+    # 1. Valid PNG
+    png_bytes = b"\x89PNG\r\n\x1a\n" + b"\x00" * 100
+    rec_png = mgr.ingest_artifact(file_input=png_bytes, filename="test.png")
+    assert rec_png.mime_type == "image/png"
+    assert len(rec_png.content_hash) == 64
+    assert os.path.exists(rec_png.storage_path)
+
+    # 2. Valid JPEG
+    jpg_bytes = b"\xff\xd8\xff" + b"\x00" * 50
+    rec_jpg = mgr.ingest_artifact(file_input=jpg_bytes, filename="test.jpg")
+    assert rec_jpg.mime_type == "image/jpeg"
+
+    # 3. Empty file rejected
+    with pytest.raises(ValueError, match="empty artifact"):
+        mgr.ingest_artifact(file_input=b"")
+
+    # 4. Oversized file (>25 MB) rejected
+    oversized_bytes = b"0" * (26 * 1024 * 1024)
+    with pytest.raises(ValueError, match="exceeds maximum size"):
+        mgr.ingest_artifact(file_input=oversized_bytes)
+
+
+def test_vlm_robustness_malformed_json_and_fences():
+    """Verify SchemaValidator sanitizes markdown fences, missing keys, and invalid enums without crashing."""
+    from indusai.multimodal.validators import SchemaValidator
+
+    # Raw response with unknown defect, markdown wrapping, and strange keys
+    malformed_dict = {
+        "category": "DEFECT_INSPECTION",
+        "defect_class": "NON_EXISTENT_DEFECT_CLASS_99",
+        "observations": ["Discoloration noticed on outer ring"],
+        "bbox": [0.1, 0.2, 0.5, 0.6],
+        "nameplate": {
+            "rated_power_kw": {"value": 315.0, "unit": "kW"},
+        },
+        "unknown_extra_field": "test_value"
+    }
+
+    proposal = SchemaValidator.sanitize_raw_proposal(
+        raw_dict=malformed_dict,
+        provider_id="ollama_mock",
+        default_equipment_tag="P-101"
+    )
+
+    assert proposal.observed_defect_class == DefectClass.UNKNOWN
+    assert proposal.equipment_tag_candidate == "P-101"
+    assert len(proposal.observed_regions) == 1
+    assert proposal.observed_regions[0].to_list() == [0.1, 0.2, 0.5, 0.6]
+
+
+def test_bounding_box_validator_adversarial_geometry():
+    """Verify BoundingBoxValidator rejects inverted, out-of-bounds, NaN/Inf, and tiny boxes."""
+    from indusai.multimodal.validators import BoundingBoxValidator
+
+    # Inverted X
+    ok, reason = BoundingBoxValidator.validate_coordinates(0.1, 0.8, 0.5, 0.2)
+    assert ok is False
+    assert "Inverted" in reason
+
+    # Out of unit frame [0, 1]
+    ok, reason = BoundingBoxValidator.validate_coordinates(0.1, -0.2, 0.5, 0.8)
+    assert ok is False
+
+    # NaN coordinates
+    ok, reason = BoundingBoxValidator.validate_coordinates(float("nan"), 0.2, 0.5, 0.8)
+    assert ok is False
+    assert "NaN" in reason
+
+    # Absurdly tiny box (point/line with area < 0.0001)
+    ok, reason = BoundingBoxValidator.validate_coordinates(0.1, 0.1, 0.1001, 0.1001)
+    assert ok is False
+    assert "minimal physical threshold" in reason
+
+
+def test_domain_validation_physical_boundary_limits():
+    """Verify DomainValidator rejects physically impossible operational parameters."""
+    from indusai.multimodal.validators import DomainValidator
+
+    # Power exceeds 10,000 kW for pump
+    impossible_proposal = RawInspectionProposal(
+        provider_id="test",
+        proposed_category=PhotoCategory.NAMEPLATE_OCR,
+        equipment_tag_candidate="P-101",
+        nameplate_proposal={
+            "rated_power_kw": {"value": 999999.0, "unit": "kW"},
+            "rated_speed_rpm": {"value": 1480, "unit": "RPM"},
+        }
+    )
+
+    dom = DomainValidator.validate_proposal(impossible_proposal)
+    assert dom.range_valid is False
+    assert dom.status == "INVALID"
+    assert any("out of physical" in d for d in dom.details)
+
+
+def test_cross_modal_correlator_triangulation():
+    """Verify CrossModalCorrelator correctly synthesizes visual, telemetry, and SOP evidence."""
+    from backend.verification.cross_correlation import CrossModalCorrelator
+    from indusai.multimodal.photo_inspector import PhotographInspectionEngine
+
+    engine = PhotographInspectionEngine(force_mode="test")
+    vis_res = engine.inspect_photograph(
+        image_input="samples/vision_fixtures/p101_bearing.jpg",
+        artifact_id="p101_bearing",
+        metadata={"fixture_scenario": "P101_BEARING_SPALLING"}
+    )
+
+    # 1. Full Corroboration: Visual + Telemetry Trip + SOP
+    corr = CrossModalCorrelator.correlate(
+        visual_result=vis_res,
+        telemetry_context={"vibration_rms": 9.82, "bearing_temp_c": 104.2},
+        sop_evidence=[{"evidence_id": "sop_01", "content": "SOP-MRPL-P101-MNT Section 4.2 Bearing Replacement"}],
+    )
+    assert corr.corroboration == "STRONG"
+    assert corr.visual_support is True
+    assert corr.telemetry_support is True
+    assert corr.sop_support is True
+    assert "shutdown" in corr.recommended_action.lower()
+
+    # 2. Partial: Visual only, normal telemetry
+    corr_partial = CrossModalCorrelator.correlate(
+        visual_result=vis_res,
+        telemetry_context={"vibration_rms": 2.1, "bearing_temp_c": 55.0},
+        sop_evidence=[],
+    )
+    assert corr_partial.corroboration == "PARTIAL"
+    assert corr_partial.telemetry_support is False
+
+
+def test_ed25519_visual_evidence_attestation_and_tamper_proofing():
+    """Verify Ed25519 signing of PhotographInspectionResult and tamper detection."""
+    from security.attestation import get_attestor, EvidenceVerifier
+    from indusai.multimodal.photo_inspector import PhotographInspectionEngine
+
+    engine = PhotographInspectionEngine(force_mode="test")
+    vis_res = engine.inspect_photograph(
+        image_input="samples/vision_fixtures/p101_bearing.jpg",
+        artifact_id="art_bearing_proof",
+        metadata={"fixture_scenario": "P101_BEARING_SPALLING"}
+    )
+
+    attestor = get_attestor()
+    proof = attestor.sign_photograph_inspection(vis_res)
+
+    assert proof is not None
+    assert proof["sealed"] is True
+    assert proof["algorithm"] == "Ed25519"
+    assert "PROOF-INSP-" in proof["proof_id"]
+
+    # Verify signature passes
+    verifier = EvidenceVerifier()
+    res_verify = verifier.verify_proof_package(proof)
+    assert res_verify["verified"] is True
+    assert res_verify["error"] is None
+
+    # Tamper with content: change severity to NORMAL
+    tampered_proof = dict(proof)
+    tampered_payload = dict(proof["canonical_payload"])
+    tampered_payload["severity"] = "NORMAL"
+    tampered_proof["canonical_payload"] = tampered_payload
+
+    res_tampered = verifier.verify_proof_package(tampered_proof)
+    assert res_tampered["verified"] is False
+
+
+def test_production_mode_rejects_missing_image_without_fabrication():
+    """
+    Phase 1.2 Invariant:
+    Under execution_mode='production', missing image returns INCONCLUSIVE.
+    Never fabricates a synthetic image or synthetic evidence.
+    """
+    agent = MultimodalVisionAgent()
+    res = agent.inspect(
+        artifact_id="non_existent_image_artifact_123",
+        execution_mode="production"
+    )
+
+    assert res.inspection_status == InspectionStatus.INCONCLUSIVE
+    assert res.evidence_status == EvidenceStatus.REJECTED
+    assert res.defect_detected is False
+    assert res.severity == SeverityLevel.UNKNOWN
+    assert "missing" in res.summary.lower()
+
