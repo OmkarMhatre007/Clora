@@ -11,6 +11,7 @@ import DataSourcesView from './views/DataSourcesView';
 import IntelligenceAgentsView from './views/IntelligenceAgentsView';
 import IntelligenceModelsView from './views/IntelligenceModelsView';
 import SovereigntyView from './views/SovereigntyView';
+import VisualInspectionView from './views/VisualInspectionView';
 
 import { getWorkspaces, getWorkspaceFiles, getWorkspaceQueries, getModels } from './services/api';
 
@@ -119,6 +120,9 @@ export default function App() {
                 )}
                 {activeView === 'intelligence-models' && (
                   <IntelligenceModelsView />
+                )}
+                {activeView === 'visual-inspection' && (
+                  <VisualInspectionView />
                 )}
                 {(activeView === 'sovereignty' || activeView === 'audit-trail' || activeView === 'settings') && (
                   <SovereigntyView />

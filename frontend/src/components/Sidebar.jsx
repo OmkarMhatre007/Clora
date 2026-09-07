@@ -9,7 +9,8 @@ import {
   FileText,
   Clock,
   Sparkles,
-  Zap
+  Zap,
+  Camera
 } from 'lucide-react';
 
 export default function Sidebar({ activeView = 'workbench', onViewChange, liveStats = {} }) {
@@ -18,6 +19,7 @@ export default function Sidebar({ activeView = 'workbench', onViewChange, liveSt
       title: 'OPERATIONS',
       items: [
         { id: 'workbench', label: 'Investigation Workbench', icon: Layers, badge: liveStats.queriesCount ? `${liveStats.queriesCount}` : null },
+        { id: 'visual-inspection', label: 'Visual Inspection & BBox', icon: Camera, badge: '5-Level' },
         { id: 'data-sources', label: 'Data Sources & OCR', icon: Database, badge: liveStats.filesCount ? `${liveStats.filesCount}` : null },
         { id: 'graph', label: 'Topology Graph', icon: Network },
       ]

@@ -57,13 +57,22 @@ class CrossModalCorrelator:
         telemetry_context: Optional[Dict[str, Any]] = None,
         sop_evidence: Optional[List[Dict[str, Any]]] = None,
         equipment_tag: Optional[str] = None,
+        sop_context: Optional[Any] = None,
     ) -> CrossCorrelationResult:
         """
         Executes cross-modal corroboration across visual, telemetry, and SOP domains.
         """
         tag = equipment_tag or (visual_result.equipment_tag if visual_result else "P-101")
         t = telemetry_context or {}
-        sops = sop_evidence or []
+        
+        # Support either sop_evidence or sop_context
+        raw_sops = sop_evidence or sop_context or []
+        if isinstance(raw_sops, dict):
+            sops = [raw_sops]
+        elif isinstance(raw_sops, list):
+            sops = raw_sops
+        else:
+            sops = []
 
         # 1. Visual Support Analysis
         visual_support = False
@@ -86,8 +95,8 @@ class CrossModalCorrelator:
         telem_ev_id = None
         corroborating_metrics = {}
 
-        vib_rms = t.get("vibration_rms", t.get("vibration_velocity_rms"))
-        temp_c = t.get("bearing_temp_c", t.get("temperature_c", t.get("stator_temp_c")))
+        vib_rms = t.get("vibration_rms", t.get("vibration_velocity_rms", t.get("vibration_velocity_rms_mm_s", t.get("vibration"))))
+        temp_c = t.get("bearing_temp_c", t.get("bearing_temperature_c", t.get("temperature_c", t.get("stator_temp_c", t.get("temp_c")))))
 
         if vib_rms is not None:
             corroborating_metrics["vibration_velocity_rms_mms"] = float(vib_rms)
@@ -115,12 +124,12 @@ class CrossModalCorrelator:
         sop_rec = ""
 
         for sop in sops:
-            content = (sop.get("content") or sop.get("text") or "").lower()
-            doc_name = (sop.get("source_document") or sop.get("source") or "").lower()
+            content = (sop.get("content") or sop.get("text") or sop.get("title") or sop.get("sop_id") or "").lower()
+            doc_name = (sop.get("source_document") or sop.get("source") or sop.get("title") or "").lower()
             if any(k in content or k in doc_name for k in ["sop", "procedure", "maintenance", "section 4", "bearing replacement", "api 610"]):
                 sop_support = True
-                sop_ev_id = sop.get("evidence_id", "ev_sop_mnt_p101")
-                sop_rec = sop.get("content", "")[:180]
+                sop_ev_id = sop.get("evidence_id", sop.get("sop_id", "ev_sop_mnt_p101"))
+                sop_rec = (sop.get("content") or sop.get("title") or "")[:180]
                 break
 
         # If no explicit SOP found in evidence list, check if policy gate generated an evidence-bound SOP recommendation
